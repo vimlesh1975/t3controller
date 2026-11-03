@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Circle, Square, Disc } from 'lucide-react';
+import { Circle, Square, Disc, RefreshCw } from 'lucide-react';
 
 const DEFAULT_HOST = process.env.NEXT_PUBLIC_T3_HOST || '192.168.145.20';
 const DEFAULT_PORT = parseInt(process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
@@ -14,6 +14,10 @@ export default function CompactTripleChannelRecordPage() {
     Vtr2: '10',
     Vtr3: '10',
   });
+  const [playerClipName, setPlayerClipName] = useState('');
+  const [playerCueTimecode, setPlayerCueTimecode] = useState('00:00:00:00');
+  const [clipSearch, setClipSearch] = useState('');
+  const [dragOverPlayer, setDragOverPlayer] = useState(false);
 
   // Poll or SSE Stream connection
   useEffect(() => {
@@ -79,6 +83,9 @@ export default function CompactTripleChannelRecordPage() {
         if (action === 'record') {
           updatedCh.transportStatus = 'RECORDING';
           updatedCh.tally = { ...updatedCh.tally, recording: true, onAir: false };
+        } else if (action === 'play') {
+          updatedCh.transportStatus = 'PLAYING';
+          updatedCh.tally = { ...updatedCh.tally, recording: false, onAir: true };
         } else if (action === 'stop') {
           updatedCh.transportStatus = 'STOPPED';
           updatedCh.tally = { ...updatedCh.tally, recording: false, onAir: false };
@@ -106,16 +113,24 @@ export default function CompactTripleChannelRecordPage() {
           },
         };
       });
-    } else if (action === 'record_all' || action === 'stop_all') {
+    } else if (action === 'record_all' || action === 'play_all' || action === 'stop_all') {
       const isRec = action === 'record_all';
+      const isPlaying = action === 'play_all';
       setDeckState((prev) => {
         if (!prev?.channels) return prev;
         const newChannels = {};
         for (const [k, v] of Object.entries(prev.channels)) {
+          const isRecorder = v.type === 'RECORD' || v.type === 'RECORD_PLAY';
+          const isPlayer = v.type === 'PLAY' || v.type === 'RECORD_PLAY';
+          const isTarget = action === 'stop_all' || (isRec ? isRecorder : isPlayer);
           newChannels[k] = {
             ...v,
-            transportStatus: isRec ? 'RECORDING' : 'STOPPED',
-            tally: { ...v.tally, recording: isRec, onAir: false },
+            transportStatus: isTarget
+              ? (isRec ? 'RECORDING' : isPlaying ? 'PLAYING' : 'STOPPED')
+              : v.transportStatus,
+            tally: isTarget
+              ? { ...v.tally, recording: isRec, onAir: isPlaying }
+              : v.tally,
           };
         }
         return { ...prev, channels: newChannels };
@@ -148,6 +163,28 @@ export default function CompactTripleChannelRecordPage() {
     sendCommand('record', channel);
   }, [sendCommand]);
 
+  const startPlayback = useCallback((channel) => {
+    sendCommand('play', channel);
+  }, [sendCommand]);
+
+  const loadPlayerClip = useCallback(() => {
+    const clipName = playerClipName.trim();
+    if (clipName) sendCommand('load_clip', 'Vtr3', { clipName });
+  }, [playerClipName, sendCommand]);
+
+  const loadClipToPlayer = useCallback((clip) => {
+    setPlayerClipName(clip.name);
+    sendCommand('load_clip', 'Vtr3', { clipName: clip.name });
+  }, [sendCommand]);
+
+  const syncClipList = useCallback(() => {
+    sendCommand('sync_clips', 'Vtr1');
+  }, [sendCommand]);
+
+  const cuePlayer = useCallback(() => {
+    sendCommand('cue_timecode', 'Vtr3', { timecode: playerCueTimecode });
+  }, [playerCueTimecode, sendCommand]);
+
   const stopRecord = useCallback((channel) => {
     sendCommand('stop', channel);
   }, [sendCommand]);
@@ -168,7 +205,11 @@ export default function CompactTripleChannelRecordPage() {
     sendCommand('stop_all');
   }, [sendCommand]);
 
-  // Keyboard shortcuts (1: Ch1, 2: Ch2, 3: Ch3, R: Rec All, S/Esc: Stop All)
+  const playAll = useCallback(() => {
+    sendCommand('play_all');
+  }, [sendCommand]);
+
+  // Keyboard shortcuts (1: R1, 2: R2, 3: P1, R: Rec All, P: Play All, S/Esc: Stop All)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
@@ -185,12 +226,15 @@ export default function CompactTripleChannelRecordPage() {
         else startRecord('Vtr2');
       } else if (key === '3') {
         e.preventDefault();
-        const ch3Rec = deckState?.channels?.['Vtr3']?.transportStatus === 'RECORDING' || deckState?.channels?.['Vtr3']?.tally?.recording;
-        if (ch3Rec) stopRecord('Vtr3');
-        else startRecord('Vtr3');
+        const ch3Playing = deckState?.channels?.['Vtr3']?.transportStatus === 'PLAYING';
+        if (ch3Playing) stopRecord('Vtr3');
+        else startPlayback('Vtr3');
       } else if (key === 'r') {
         e.preventDefault();
         recordAll();
+      } else if (key === 'p') {
+        e.preventDefault();
+        playAll();
       } else if (key === 's' || e.key === 'Escape') {
         e.preventDefault();
         stopAll();
@@ -198,31 +242,54 @@ export default function CompactTripleChannelRecordPage() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deckState, startRecord, stopRecord, recordAll, stopAll]);
+  }, [deckState, startRecord, startPlayback, stopRecord, recordAll, playAll, stopAll]);
 
-  const ch1 = deckState?.channels?.['Vtr1'] || {};
-  const ch2 = deckState?.channels?.['Vtr2'] || {};
-  const ch3 = deckState?.channels?.['Vtr3'] || {};
+  const ch1 = deckState?.channels?.['Vtr1'] || { type: 'RECORD' };
+  const ch2 = deckState?.channels?.['Vtr2'] || { type: 'RECORD' };
+  const ch3 = deckState?.channels?.['Vtr3'] || { type: 'PLAY' };
 
   const ch1Recording = ch1.transportStatus === 'RECORDING' || ch1.tally?.recording === true;
   const ch2Recording = ch2.transportStatus === 'RECORDING' || ch2.tally?.recording === true;
-  const ch3Recording = ch3.transportStatus === 'RECORDING' || ch3.tally?.recording === true;
+  const ch3Playing = ch3.transportStatus === 'PLAYING' || ch3.tally?.onAir === true;
 
   const host = deckState?.host || DEFAULT_HOST;
   const port = deckState?.port || DEFAULT_PORT;
   const isConnected = deckState?.isConnected;
 
-  const renderChannelDeck = (chId, label, ch, isRec, hotkeyNum) => (
-    <div key={chId} style={{
+  const renderChannelDeck = (chId, label, ch, isActive, hotkeyNum) => {
+    const isRecorder = ch.type === 'RECORD' || ch.type === 'RECORD_PLAY';
+    const activeColor = isRecorder ? '#ef4444' : '#22c55e';
+
+    return (
+    <div
+      key={chId}
+      id={`deck-${chId.toLowerCase()}`}
+      role={!isRecorder ? 'group' : undefined}
+      aria-label={!isRecorder ? 'P1 player drop target' : undefined}
+      onDragOver={!isRecorder ? (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        setDragOverPlayer(true);
+      } : undefined}
+      onDrop={!isRecorder ? (event) => {
+        event.preventDefault();
+        setDragOverPlayer(false);
+        const clipName = event.dataTransfer.getData('text/plain').trim();
+        if (clipName) loadClipToPlayer({ name: clipName });
+      } : undefined}
+      onDragLeave={!isRecorder ? (event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setDragOverPlayer(false);
+      } : undefined}
+      style={{
       background: '#0d1019',
       borderRadius: '10px',
-      border: `1.5px solid ${isRec ? '#ef4444' : 'rgba(255, 255, 255, 0.08)'}`,
+      border: `1.5px solid ${!isRecorder && dragOverPlayer ? '#22c55e' : isActive ? activeColor : 'rgba(255, 255, 255, 0.08)'}`,
       padding: '12px 14px',
       display: 'flex',
       flexDirection: 'column',
       gap: '10px',
-      boxShadow: isRec
-        ? '0 0 20px rgba(239, 68, 68, 0.25), inset 0 0 10px rgba(239, 68, 68, 0.06)'
+      boxShadow: isActive
+        ? `0 0 20px ${isRecorder ? 'rgba(239, 68, 68, 0.25)' : 'rgba(34, 197, 94, 0.25)'}, inset 0 0 10px ${isRecorder ? 'rgba(239, 68, 68, 0.06)' : 'rgba(34, 197, 94, 0.06)'}`
         : '0 4px 12px rgba(0, 0, 0, 0.35)',
       transition: 'all 0.15s ease',
     }}>
@@ -240,7 +307,7 @@ export default function CompactTripleChannelRecordPage() {
             fontWeight: 800,
             padding: '2px 6px',
             borderRadius: '4px',
-            background: isRec ? '#ef4444' : '#334155',
+            background: isActive ? activeColor : '#334155',
             color: '#fff',
             letterSpacing: '0.8px',
           }}>
@@ -257,16 +324,16 @@ export default function CompactTripleChannelRecordPage() {
           gap: '5px',
           fontSize: '10px',
           fontWeight: 700,
-          color: isRec ? '#f87171' : '#64748b',
+          color: isActive ? (isRecorder ? '#f87171' : '#4ade80') : '#64748b',
         }}>
           <span style={{
             width: '7px',
             height: '7px',
             borderRadius: '50%',
-            backgroundColor: isRec ? '#ef4444' : '#475569',
-            boxShadow: isRec ? '0 0 8px #ef4444' : 'none',
+            backgroundColor: isActive ? activeColor : '#475569',
+            boxShadow: isActive ? `0 0 8px ${activeColor}` : 'none',
           }} />
-          <span>{isRec ? '● REC' : 'IDLE'}</span>
+          <span>{isActive ? (isRecorder ? '● REC' : '● PLAY') : 'IDLE'}</span>
         </div>
       </div>
 
@@ -279,13 +346,13 @@ export default function CompactTripleChannelRecordPage() {
         flexDirection: 'column',
         alignItems: 'center',
         gap: '5px',
-        border: `1px solid ${isRec ? 'rgba(239, 68, 68, 0.35)' : 'rgba(255, 255, 255, 0.05)'}`,
+        border: `1px solid ${isActive ? (isRecorder ? 'rgba(239, 68, 68, 0.35)' : 'rgba(34, 197, 94, 0.35)') : 'rgba(255, 255, 255, 0.05)'}`,
       }}>
         <div style={{
           fontFamily: "'Share Tech Mono', 'JetBrains Mono', monospace",
           fontSize: '24px',
           fontWeight: 700,
-          color: isRec ? '#ef4444' : '#ffaa00',
+          color: isActive ? activeColor : '#ffaa00',
           letterSpacing: '1.5px',
           lineHeight: 1,
           userSelect: 'none',
@@ -306,16 +373,16 @@ export default function CompactTripleChannelRecordPage() {
         gridTemplateColumns: '1fr 1fr',
         gap: '8px',
       }}>
-        {/* Record Button */}
+        {/* Recorder / player transport button */}
         <button
           type="button"
-          id={`btn-${chId.toLowerCase()}-record`}
-          onClick={() => startRecord(chId)}
+          id={`btn-${chId.toLowerCase()}-${isRecorder ? 'record' : 'play'}`}
+          onClick={() => (isRecorder ? startRecord(chId) : startPlayback(chId))}
           style={{
-            background: isRec
-              ? 'linear-gradient(180deg, #dc2626 0%, #991b1b 100%)'
-              : 'linear-gradient(180deg, #ef4444 0%, #b91c1c 100%)',
-            border: `1.5px solid ${isRec ? '#fca5a5' : '#ef4444'}`,
+            background: isRecorder
+              ? (isActive ? 'linear-gradient(180deg, #dc2626 0%, #991b1b 100%)' : 'linear-gradient(180deg, #ef4444 0%, #b91c1c 100%)')
+              : (isActive ? 'linear-gradient(180deg, #16a34a 0%, #166534 100%)' : 'linear-gradient(180deg, #22c55e 0%, #15803d 100%)'),
+            border: `1.5px solid ${isRecorder ? '#ef4444' : '#22c55e'}`,
             borderRadius: '8px',
             padding: '10px 12px',
             display: 'flex',
@@ -325,20 +392,20 @@ export default function CompactTripleChannelRecordPage() {
             gap: '8px',
             color: '#ffffff',
             cursor: 'pointer',
-            boxShadow: isRec
-              ? '0 0 15px rgba(239, 68, 68, 0.6), inset 0 1px 2px rgba(255, 255, 255, 0.4)'
+            boxShadow: isActive
+              ? `0 0 15px ${isRecorder ? 'rgba(239, 68, 68, 0.6)' : 'rgba(34, 197, 94, 0.6)'}, inset 0 1px 2px rgba(255, 255, 255, 0.4)`
               : '0 4px 10px rgba(0, 0, 0, 0.35)',
             transition: 'all 0.1s ease',
             userSelect: 'none',
           }}
         >
-          <Circle size={15} fill="#ffffff" />
+          {isRecorder ? <Circle size={15} fill="#ffffff" /> : <Disc size={15} />}
           <span style={{
             fontSize: '13px',
             fontWeight: 800,
             letterSpacing: '0.6px',
           }}>
-            REC [{hotkeyNum}]
+            {isRecorder ? 'REC' : 'PLAY'} [{hotkeyNum}]
           </span>
         </button>
 
@@ -348,10 +415,10 @@ export default function CompactTripleChannelRecordPage() {
           id={`btn-${chId.toLowerCase()}-stop`}
           onClick={() => stopRecord(chId)}
           style={{
-            background: isRec
+            background: isActive
               ? 'linear-gradient(180deg, #475569 0%, #1e293b 100%)'
               : 'linear-gradient(180deg, #1e293b 0%, #0f172a 100%)',
-            border: `1.5px solid ${isRec ? '#f87171' : 'rgba(255, 255, 255, 0.12)'}`,
+            border: `1.5px solid ${isActive ? activeColor : 'rgba(255, 255, 255, 0.12)'}`,
             borderRadius: '8px',
             padding: '10px 12px',
             display: 'flex',
@@ -359,16 +426,16 @@ export default function CompactTripleChannelRecordPage() {
             alignItems: 'center',
             justifyContent: 'center',
             gap: '8px',
-            color: isRec ? '#ffffff' : '#94a3b8',
+            color: isActive ? '#ffffff' : '#94a3b8',
             cursor: 'pointer',
-            boxShadow: isRec
-              ? '0 0 12px rgba(248, 113, 113, 0.3)'
+            boxShadow: isActive
+              ? `0 0 12px ${isRecorder ? 'rgba(248, 113, 113, 0.3)' : 'rgba(34, 197, 94, 0.3)'}`
               : '0 4px 10px rgba(0, 0, 0, 0.35)',
             transition: 'all 0.1s ease',
             userSelect: 'none',
           }}
         >
-          <Square size={14} fill={isRec ? '#ffffff' : '#94a3b8'} />
+          <Square size={14} fill={isActive ? '#ffffff' : '#94a3b8'} />
           <span style={{
             fontSize: '13px',
             fontWeight: 800,
@@ -379,6 +446,7 @@ export default function CompactTripleChannelRecordPage() {
         </button>
       </div>
 
+      {isRecorder && <>
       <label
         htmlFor={`${chId.toLowerCase()}-interval-seconds`}
         style={{
@@ -421,8 +489,8 @@ export default function CompactTripleChannelRecordPage() {
         type="button"
         id={`btn-${chId.toLowerCase()}-interval-record`}
         onClick={() => toggleIntervalRecording(chId, Boolean(ch.intervalRecording), intervalSeconds[chId])}
-        disabled={isRec && !ch.intervalRecording}
-        title={isRec && !ch.intervalRecording
+        disabled={isActive && !ch.intervalRecording}
+        title={isActive && !ch.intervalRecording
           ? 'Stop the current recording before starting interval recording'
           : `Continuously record, splitting the recording into ${intervalSeconds[chId]}-second clips`}
         style={{
@@ -436,12 +504,12 @@ export default function CompactTripleChannelRecordPage() {
           alignItems: 'center',
           justifyContent: 'center',
           gap: '8px',
-          color: isRec && !ch.intervalRecording ? '#64748b' : '#f8fafc',
-          cursor: isRec && !ch.intervalRecording ? 'not-allowed' : 'pointer',
+          color: isActive && !ch.intervalRecording ? '#64748b' : '#f8fafc',
+          cursor: isActive && !ch.intervalRecording ? 'not-allowed' : 'pointer',
           fontSize: '12px',
           fontWeight: 800,
           letterSpacing: '0.5px',
-          opacity: isRec && !ch.intervalRecording ? 0.6 : 1,
+          opacity: isActive && !ch.intervalRecording ? 0.6 : 1,
         }}
       >
         <Disc size={14} />
@@ -451,8 +519,147 @@ export default function CompactTripleChannelRecordPage() {
             : `START ${intervalSeconds[chId] || 0}s SPLIT RECORDING`}
         </span>
       </button>
+      </>}
+
+      {!isRecorder && (
+        <section
+          aria-label="Player media and transport controls"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            paddingTop: '8px',
+            borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+          }}
+        >
+          <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+            {dragOverPlayer ? 'Drop to load on P1' : 'Loaded media:'}{' '}
+            <strong style={{ color: ch.activeClip?.name ? '#e2e8f0' : '#fbbf24' }}>
+              {ch.activeClip?.name || 'No clip loaded'}
+            </strong>
+          </div>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              loadPlayerClip();
+            }}
+            style={{ display: 'flex', gap: '6px' }}
+          >
+            <input
+              aria-label="T3 clip name"
+              type="text"
+              maxLength={128}
+              value={playerClipName}
+              onChange={(event) => setPlayerClipName(event.target.value)}
+              placeholder="Enter T3 clip name"
+              style={{
+                minWidth: 0,
+                flex: 1,
+                padding: '7px 8px',
+                border: '1px solid rgba(255, 255, 255, 0.18)',
+                borderRadius: '6px',
+                background: '#04060a',
+                color: '#f8fafc',
+                fontSize: '12px',
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!playerClipName.trim()}
+              style={{
+                border: '1px solid #22c55e',
+                borderRadius: '6px',
+                padding: '7px 10px',
+                background: '#14532d',
+                color: '#fff',
+                fontWeight: 700,
+                cursor: playerClipName.trim() ? 'pointer' : 'not-allowed',
+                opacity: playerClipName.trim() ? 1 : 0.55,
+              }}
+            >
+              LOAD
+            </button>
+          </form>
+
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              cuePlayer();
+            }}
+            style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <label htmlFor="player-cue-timecode" style={{ fontSize: '11px', color: '#cbd5e1' }}>
+              Cue
+            </label>
+            <input
+              id="player-cue-timecode"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]{2}:[0-9]{2}:[0-9]{2}:[0-9]{2}"
+              maxLength={11}
+              value={playerCueTimecode}
+              onChange={(event) => setPlayerCueTimecode(event.target.value)}
+              aria-label="Cue timecode in HH:MM:SS:FF format"
+              style={{
+                width: '120px',
+                padding: '7px 8px',
+                border: '1px solid rgba(255, 255, 255, 0.18)',
+                borderRadius: '6px',
+                background: '#04060a',
+                color: '#f8fafc',
+                fontSize: '12px',
+                fontFamily: 'monospace',
+              }}
+            />
+            <button
+              type="submit"
+              style={{
+                border: '1px solid rgba(255, 255, 255, 0.18)',
+                borderRadius: '6px',
+                padding: '7px 10px',
+                background: '#1e293b',
+                color: '#fff',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              CUE
+            </button>
+          </form>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
+            {[
+              { label: '−1 FRAME', action: 'jog', params: { frames: -1 } },
+              { label: '−2×', action: 'shuttle', params: { rate: -2 } },
+              { label: 'LOOP', action: 'set_loop', params: { enabled: !ch.loop }, active: Boolean(ch.loop) },
+              { label: '+2×', action: 'shuttle', params: { rate: 2 } },
+              { label: '+1 FRAME', action: 'jog', params: { frames: 1 } },
+            ].map((control) => (
+              <button
+                key={control.label}
+                type="button"
+                onClick={() => sendCommand(control.action, chId, control.params)}
+                aria-pressed={control.action === 'set_loop' ? Boolean(ch.loop) : undefined}
+                style={{
+                  border: `1px solid ${control.active ? '#22c55e' : 'rgba(255, 255, 255, 0.14)'}`,
+                  borderRadius: '6px',
+                  padding: '8px 4px',
+                  background: control.active ? '#14532d' : '#111827',
+                  color: '#e2e8f0',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                {control.label}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
+  };
 
   return (
     <main style={{
@@ -487,7 +694,7 @@ export default function CompactTripleChannelRecordPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <Disc size={15} color="#ef4444" />
             <span style={{ fontWeight: 800, color: '#fff', letterSpacing: '0.5px' }}>
-              GRASS VALLEY T3 • 3-RECORDER CONSOLE
+              GRASS VALLEY T3 • 2-RECORDER / 1-PLAYER CONSOLE
             </span>
           </div>
 
@@ -527,7 +734,7 @@ export default function CompactTripleChannelRecordPage() {
         {/* Global Master Quick Controls (Compact Row) */}
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
           gap: '8px',
         }}>
           <button
@@ -553,7 +760,33 @@ export default function CompactTripleChannelRecordPage() {
             }}
           >
             <Circle size={12} fill="#ffffff" />
-            <span>RECORD ALL (R1 + R2 + R3) [R]</span>
+            <span>RECORD ALL (R1 + R2) [R]</span>
+          </button>
+
+          <button
+            type="button"
+            id="btn-play-all"
+            onClick={playAll}
+            style={{
+              background: 'linear-gradient(180deg, #16a34a 0%, #166534 100%)',
+              border: '1px solid #22c55e',
+              borderRadius: '6px',
+              padding: '8px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px',
+              color: '#ffffff',
+              fontSize: '12px',
+              fontWeight: 800,
+              letterSpacing: '0.6px',
+              cursor: 'pointer',
+              userSelect: 'none',
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+            }}
+          >
+            <Disc size={12} />
+            <span>PLAY ALL (P1) [P]</span>
           </button>
 
           <button
@@ -579,11 +812,11 @@ export default function CompactTripleChannelRecordPage() {
             }}
           >
             <Square size={12} fill="#cbd5e1" />
-            <span>STOP ALL (R1 + R2 + R3) [S]</span>
+            <span>STOP ALL (R1 + R2 + P1) [S]</span>
           </button>
         </div>
 
-        {/* 3-Channel Deck Grid: R1, R2, R3 (Ultra-Compact) */}
+        {/* Two recorder channels and one player channel */}
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
@@ -592,8 +825,135 @@ export default function CompactTripleChannelRecordPage() {
         }}>
           {renderChannelDeck('Vtr1', 'RECORDER 1', ch1, ch1Recording, '1')}
           {renderChannelDeck('Vtr2', 'RECORDER 2', ch2, ch2Recording, '2')}
-          {renderChannelDeck('Vtr3', 'RECORDER 3', ch3, ch3Recording, '3')}
+          {renderChannelDeck('Vtr3', 'PLAYER 1', ch3, ch3Playing, '3')}
         </div>
+
+        <section
+          aria-label="Clip list"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            padding: '12px',
+            background: '#0d1019',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
+            borderRadius: '10px',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+            <div>
+              <div style={{ fontSize: '13px', fontWeight: 800, color: '#f8fafc' }}>CLIP LIST</div>
+              <div style={{ marginTop: '3px', fontSize: '10px', color: '#94a3b8' }}>
+                {deckState?.clipListSource === 'simulator'
+                  ? 'Drag a clip onto the P1 deck to load it.'
+                  : 'T3 clip IDs seen on connected decks · drag a clip onto P1 to load it.'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <input
+                type="search"
+                aria-label="Search clip list"
+                placeholder="Search clips"
+                value={clipSearch}
+                onChange={(event) => setClipSearch(event.target.value)}
+                style={{
+                  width: 'min(180px, 38vw)',
+                  padding: '7px 9px',
+                  border: '1px solid rgba(255, 255, 255, 0.16)',
+                  borderRadius: '6px',
+                  background: '#04060a',
+                  color: '#f8fafc',
+                  fontSize: '12px',
+                }}
+              />
+              <button
+                type="button"
+                onClick={syncClipList}
+                disabled={Boolean(deckState?.clipListLoading)}
+                title="Refresh clip list from the T3 media server"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  padding: '7px 9px',
+                  border: '1px solid rgba(255, 255, 255, 0.16)',
+                  borderRadius: '6px',
+                  background: '#1e293b',
+                  color: '#e2e8f0',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: deckState?.clipListLoading ? 'wait' : 'pointer',
+                }}
+              >
+                <RefreshCw size={12} />
+                {deckState?.clipListLoading ? 'SYNCING' : 'SYNC'}
+              </button>
+            </div>
+          </div>
+
+          {deckState?.clipListError && (
+            <div role="alert" style={{ color: '#fca5a5', fontSize: '11px' }}>
+              {deckState.clipListError}
+            </div>
+          )}
+
+          {deckState?.clipListUpdatedAt && (
+            <div style={{ color: '#64748b', fontSize: '10px' }}>
+              Last synced: {new Date(deckState.clipListUpdatedAt).toLocaleTimeString()}
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gap: '5px', maxHeight: '240px', overflowY: 'auto' }}>
+            {(deckState?.clips || [])
+              .filter((clip) => clip.name?.toLowerCase().includes(clipSearch.trim().toLowerCase()))
+              .map((clip, index) => (
+                <button
+                  key={clip.id || clip.name}
+                  id={`clip-list-item-${index + 1}`}
+                  type="button"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData('text/plain', clip.name);
+                    event.dataTransfer.effectAllowed = 'copy';
+                  }}
+                  onDragEnd={() => setDragOverPlayer(false)}
+                  onClick={() => loadClipToPlayer(clip)}
+                  title={`Drag to P1 or click to load ${clip.name}`}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '12px',
+                    padding: '8px 10px',
+                    border: `1px solid ${ch3.activeClip?.name === clip.name ? 'rgba(34, 197, 94, 0.55)' : 'rgba(255, 255, 255, 0.07)'}`,
+                    borderRadius: '6px',
+                    background: ch3.activeClip?.name === clip.name ? 'rgba(20, 83, 45, 0.3)' : '#090c13',
+                    color: '#e2e8f0',
+                    textAlign: 'left',
+                    cursor: 'grab',
+                  }}
+                >
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '12px', fontWeight: 700 }}>
+                    {clip.name}
+                  </span>
+                  <span style={{ flexShrink: 0, color: '#94a3b8', fontSize: '10px' }}>
+                    {clip.duration || 'Duration unknown'} · LOAD
+                  </span>
+                </button>
+              ))}
+            {!(deckState?.clips || []).some((clip) => clip.name?.toLowerCase().includes(clipSearch.trim().toLowerCase())) && (
+              <div style={{ padding: '14px 8px', color: '#94a3b8', fontSize: '11px', textAlign: 'center' }}>
+                {deckState?.clipListLoading
+                  ? 'Reading the T3 clip directory…'
+                  : clipSearch
+                    ? 'No clips match your search.'
+                    : deckState?.clipListSource === 'simulator'
+                      ? 'No clips in the simulator library.'
+                      : 'No T3 clip IDs received yet. Sync the directory or enter a clip name above.'}
+              </div>
+            )}
+          </div>
+        </section>
       </div>
     </main>
   );

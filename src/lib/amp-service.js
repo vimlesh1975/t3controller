@@ -93,22 +93,27 @@ const CHANNEL_MAP = {
   Vtr3: 'vtr_r3',
 };
 
+const CHANNEL_ROLES = {
+  Vtr1: { label: 'R1 (Recorder 1)', type: 'RECORD' },
+  Vtr2: { label: 'R2 (Recorder 2)', type: 'RECORD' },
+  Vtr3: { label: 'P1 (Player 1)', type: 'PLAY' },
+};
+
 class GrassValleyAmpService {
   constructor() {
     this.mode = 'hardware'; // 'hardware' | 'simulator'
     this.host = process.env.T3_HOST || process.env.NEXT_PUBLIC_T3_HOST || '192.168.145.20';
     this.port = parseInt(process.env.T3_PORT || process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
-    this.activeChannel = 'Vtr1'; // 'Vtr1' (R1), 'Vtr2' (P1), 'Vtr3' (P2)
+    this.activeChannel = 'Vtr1'; // 'Vtr1' (R1), 'Vtr2' (R2), 'Vtr3' (P1)
     this.isConnected = false;
     this.connectionState = 'connecting'; // 'connected' | 'connecting' | 'disconnected' | 'error'
     this.lastError = null;
 
-    // Multi-channel 3-Recorder state (R1, R2, R3)
+    // Two recorder channels and one playout channel
     this.channels = {
       Vtr1: {
         id: 'Vtr1',
-        label: 'R1 (Recorder 1)',
-        type: 'RECORD',
+        ...CHANNEL_ROLES.Vtr1,
         inputSource: 'SDI IN 1',
         transportStatus: 'STOPPED',
         timecode: '01:00:00:00',
@@ -137,8 +142,7 @@ class GrassValleyAmpService {
       },
       Vtr2: {
         id: 'Vtr2',
-        label: 'R2 (Recorder 2)',
-        type: 'RECORD',
+        ...CHANNEL_ROLES.Vtr2,
         inputSource: 'SDI IN 2',
         transportStatus: 'STOPPED',
         timecode: '01:00:00:00',
@@ -167,26 +171,16 @@ class GrassValleyAmpService {
       },
       Vtr3: {
         id: 'Vtr3',
-        label: 'R3 (Recorder 3)',
-        type: 'RECORD',
+        ...CHANNEL_ROLES.Vtr3,
         inputSource: 'SDI IN 3',
         transportStatus: 'STOPPED',
-        timecode: '01:00:00:00',
-        currentFrames: 108000,
+        timecode: '00:00:00:00',
+        currentFrames: 0,
         fps: 29.97,
         dropFrame: false,
-        activeClip: {
-          id: 'REC_CAM3',
-          name: 'CAM3_ISO_001',
-          duration: '00:00:00:00',
-          durationFrames: 0,
-          format: 'Grass Valley HQX',
-          fps: 29.97,
-          resolution: '1920x1080i',
-          bin: 'REC_BIN_R3',
-        },
-        inPoint: '01:00:00:00',
-        outPoint: '01:00:00:00',
+        activeClip: null,
+        inPoint: '00:00:00:00',
+        outPoint: '00:00:00:00',
         speed: 1.0,
         audioL: -22,
         audioR: -22,
@@ -197,12 +191,18 @@ class GrassValleyAmpService {
       },
     };
 
-    this.clips = [...DEFAULT_CLIPS];
+    this.clips = this.mode === 'simulator' ? [...DEFAULT_CLIPS] : [];
+    this.clipListSource = this.mode === 'simulator' ? 'simulator' : 't3';
+    this.clipListLoading = false;
+    this.clipListError = null;
+    this.clipListUpdatedAt = null;
+    this.clipDirectorySync = null;
     this.packetLogs = [];
     this.subscribers = new Set();
     this.sockets = {};
     this.channelHeartbeats = {};
     this.pendingHardwareCommands = {};
+    this.hardwareResponseBuffers = {};
     this.channelReconnectTimers = {};
     this.channelReconnectAttempts = {};
     this.socket = null;
@@ -303,6 +303,10 @@ class GrassValleyAmpService {
       channels: this.channels,
       currentChannelState: this.channels[this.activeChannel] || {},
       clips: this.clips,
+      clipListSource: this.clipListSource,
+      clipListLoading: this.clipListLoading,
+      clipListError: this.clipListError,
+      clipListUpdatedAt: this.clipListUpdatedAt,
       recentLogs: this.packetLogs.slice(0, 25),
     };
   }
@@ -324,6 +328,11 @@ class GrassValleyAmpService {
         this.socket = null;
       }
       this.mode = 'simulator';
+      this.clips = [...DEFAULT_CLIPS];
+      this.clipListSource = 'simulator';
+      this.clipListLoading = false;
+      this.clipListError = null;
+      this.clipListUpdatedAt = new Date().toISOString();
       this.isConnected = true;
       this.connectionState = 'connected';
       this.lastError = null;
@@ -334,6 +343,14 @@ class GrassValleyAmpService {
 
     // Hardware mode
     this.mode = 'hardware';
+    this.clipListError = null;
+    if (this.clipListSource !== 't3') {
+      this.clips = [];
+      this.clipListSource = 't3';
+      this.clipListLoading = false;
+      this.clipListError = null;
+      this.clipListUpdatedAt = null;
+    }
     if (endpointChanged || !Object.values(this.sockets).some((socket) => socket && !socket.destroyed)) {
       this.connectionState = 'connecting';
     }
@@ -372,6 +389,7 @@ class GrassValleyAmpService {
 
     const socket = new net.Socket();
     this.sockets[channelId] = socket;
+    delete this.hardwareResponseBuffers[channelId];
     if (channelId === this.activeChannel || !this.socket) {
       this.socket = socket;
     }
@@ -724,6 +742,19 @@ class GrassValleyAmpService {
         i += 4;
         continue;
       }
+      if (head === '8214') {
+        if (i + 12 > hex.length) break;
+        const nameLength = parseInt(hex.substr(i + 8, 4), 16);
+        if (!Number.isSafeInteger(nameLength) || nameLength > 4096) {
+          frames.push(hex.substr(i));
+          break;
+        }
+        const listingLength = 12 + nameLength * 2;
+        if (i + listingLength > hex.length) break;
+        frames.push(hex.substr(i, listingLength));
+        i += listingLength;
+        continue;
+      }
       const cmd1 = parseInt(hex.substr(i, 2), 16);
       let len;
       if ((cmd1 & 0xf0) === 0x80) {
@@ -734,7 +765,6 @@ class GrassValleyAmpService {
         len = 4 + (cmd1 & 0x0f) * 2;
       }
       if (i + len > hex.length) {
-        frames.push(hex.substr(i));
         break;
       }
       frames.push(hex.substr(i, len));
@@ -746,16 +776,30 @@ class GrassValleyAmpService {
   handleHardwareResponse(channelId, str, buffer) {
     const chId = channelId || this.activeChannel;
     const ch = this.channels[chId];
-    const hex = str.replace(/[^0-9a-fA-F]/g, '');
+    const hex = `${this.hardwareResponseBuffers[chId] || ''}${str.replace(/[^0-9a-fA-F]/g, '')}`;
+    const frames = this.splitAmpFrames(hex);
+    const consumed = frames.reduce((length, frame) => length + frame.length, 0);
+    this.hardwareResponseBuffers[chId] = hex.slice(consumed);
+    if (this.hardwareResponseBuffers[chId].length > 16384) {
+      this.logPacket('SYS', 'ERR_FRAME_BUFFER', `Discarding oversized incomplete AMP response on ${chId}`);
+      this.hardwareResponseBuffers[chId] = '';
+      if (this.clipDirectorySync?.channelId === chId) {
+        this.finishClipDirectorySync(`Invalid oversized response while reading the T3 clip directory on ${chId}`);
+      }
+    }
     let changed = false;
 
-    for (const frame of this.splitAmpFrames(hex)) {
+    for (const frame of frames) {
       const head = frame.substr(0, 4).toLowerCase();
 
       if (head === '1001') {
         this.logPacket('RX', '1001', `ACK [${chId}] (Command Accepted)`);
       } else if (head === '1111' || head === '2222' || head === '1112') {
         this.logPacket('RX', frame, `NAK [${chId}] (Command Rejected)`);
+        if (this.clipDirectorySync?.channelId === chId) {
+          this.finishClipDirectorySync(`T3 rejected the clip-list request on ${chId}`);
+          changed = true;
+        }
         const socket = this.sockets[chId];
         const statusSenseRejected = socket?.statusSenseSentAt
           && Date.now() - socket.statusSenseSentAt <= 1000;
@@ -813,6 +857,36 @@ class GrassValleyAmpService {
           ch.currentFrames = timecodeToFrames(tc, ch.fps || 29.97);
           changed = true;
         }
+      } else if (head === '8214' && frame.length >= 12) {
+        const nameLength = parseInt(frame.substr(8, 4), 16);
+        const name = hex2str(frame.substr(12, nameLength * 2)).replace(/\0/g, '').trim();
+        const sync = this.clipDirectorySync;
+        if (sync?.channelId === chId) {
+          if (!name) {
+            this.finishClipDirectorySync();
+          } else if (sync.clips.length >= 10000) {
+            this.finishClipDirectorySync('T3 clip list exceeded the 10,000-clip safety limit');
+          } else {
+            if (!sync.names.has(name)) {
+              sync.names.add(name);
+              sync.clips.push({
+                id: frame.substr(4, 4),
+                name,
+                duration: 'Unknown',
+                format: 'T3 media',
+                fps: ch?.fps || 29.97,
+                resolution: 'Unknown',
+                bin: 'T3',
+              });
+            }
+            this.armClipDirectorySyncTimeout(sync);
+            if (!this.sendHardwareCommand(AMP_COMMANDS.LIST_NEXT_ID, chId)) {
+              this.finishClipDirectorySync(`Could not request the next T3 clip ID on ${chId}`);
+            }
+          }
+          changed = true;
+        }
+        this.logPacket('RX', frame, `T3 CLIP [${chId}]: ${name || 'Directory listing complete'}`);
       } else if (head === '8216' && frame.length >= 12) {
         // ID Loaded reply: 82 16 <byteCount:2> <strLen:2> <ascii name>
         const strLen = parseInt(frame.substr(8, 4), 16);
@@ -827,6 +901,17 @@ class GrassValleyAmpService {
             ch.activeClip.name = name;
             ch.activeClip.id = name;
             ch.clipName = name;
+            if (this.clipListSource === 't3' && !this.clips.some((clip) => clip.name === name)) {
+              this.clips.unshift({
+                id: name,
+                name,
+                duration: 'Unknown',
+                format: 'Loaded T3 media',
+                fps: ch.fps || 29.97,
+                resolution: 'Unknown',
+                bin: 'T3',
+              });
+            }
           }
           changed = true;
         }
@@ -836,6 +921,69 @@ class GrassValleyAmpService {
     }
 
     if (changed) this.notifySubscribers();
+  }
+
+  refreshClipDirectory(channelId) {
+    if (!this.channels[channelId]) {
+      return { success: false, error: `Channel ${channelId} not found` };
+    }
+    if (this.clipDirectorySync) {
+      return { success: false, error: 'A T3 clip-list sync is already in progress' };
+    }
+
+    if (this.mode === 'simulator') {
+      this.clips = [...DEFAULT_CLIPS];
+      this.clipListSource = 'simulator';
+      this.clipListError = null;
+      this.clipListUpdatedAt = new Date().toISOString();
+      this.logPacket('SYS', 'CLIP_LIST', `Loaded ${this.clips.length} simulator clips`);
+      this.notifySubscribers();
+      return { success: true, channelState: this.channels[channelId] };
+    }
+
+    const sync = {
+      channelId,
+      clips: [],
+      names: new Set(),
+      timer: null,
+    };
+    this.clipDirectorySync = sync;
+    this.clipListLoading = true;
+    this.clipListError = null;
+    this.clipListSource = 't3';
+    this.armClipDirectorySyncTimeout(sync);
+    this.logPacket('SYS', 'CLIP_LIST_START', `Requesting T3 clip directory on ${channelId}`);
+    if (!this.sendHardwareCommand(AMP_COMMANDS.LIST_FIRST_ID, channelId)) {
+      this.finishClipDirectorySync(`Could not request the T3 clip directory on ${channelId}`);
+      return { success: false, error: this.clipListError };
+    }
+    this.notifySubscribers();
+    return { success: true, channelState: this.channels[channelId] };
+  }
+
+  armClipDirectorySyncTimeout(sync) {
+    if (sync.timer) clearTimeout(sync.timer);
+    sync.timer = setTimeout(() => {
+      if (this.clipDirectorySync !== sync) return;
+      this.finishClipDirectorySync(`Timed out while reading the T3 clip directory on ${sync.channelId}`);
+    }, 5000);
+  }
+
+  finishClipDirectorySync(error = null) {
+    const sync = this.clipDirectorySync;
+    if (!sync) return;
+    if (sync.timer) clearTimeout(sync.timer);
+    this.clipDirectorySync = null;
+    this.clipListLoading = false;
+    this.clipListError = error;
+    if (!error) {
+      this.clips = sync.clips;
+      this.clipListUpdatedAt = new Date().toISOString();
+      this.logPacket('SYS', 'CLIP_LIST_DONE', `Loaded ${this.clips.length} clip(s) from T3`);
+    } else {
+      this.logPacket('SYS', 'CLIP_LIST_ERROR', error);
+    }
+    this.notifySubscribers();
   }
 
   // High-Fidelity Simulation Clock
@@ -864,7 +1012,7 @@ class GrassValleyAmpService {
           ch.audioR = Math.max(-42, Math.min(-6, -17 + (Math.random() * 8 - 4)));
 
           // Check outPoint loop
-          if (ch.activeClip) {
+          if (ch.activeClip && ch.activeClip.duration !== 'Unknown') {
             const outFrames = timecodeToFrames(ch.outPoint || ch.activeClip.outPoint, fps);
             if (ch.currentFrames >= outFrames) {
               if (ch.loop) {
@@ -941,43 +1089,42 @@ class GrassValleyAmpService {
     switch (action) {
       case 'record_all': {
         const cmdHex = AMP_COMMANDS.RECORD;
-        this.logPacket('SYS', 'REC_ALL', 'RECORD ALL issued across all recording channels');
         for (const chId of Object.keys(this.intervalRecordings)) {
           this.stopIntervalRecording(chId);
         }
+        const recorderChannels = Object.values(this.channels)
+          .filter((channel) => channel.type === 'RECORD' || channel.type === 'RECORD_PLAY');
+        this.logPacket('SYS', 'REC_ALL', `RECORD ALL issued across ${recorderChannels.map((channel) => channel.label.split(' ')[0]).join(', ')}`);
         if (this.mode === 'hardware') {
-          for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
-            this.sendHardwareCommand(cmdHex, chId);
+          for (const channel of recorderChannels) {
+            this.sendHardwareCommand(cmdHex, channel.id);
           }
         }
         const timestamp = new Date().toISOString().replace(/[-:T.]/g, '').substr(0, 14);
-        for (const k of Object.keys(this.channels)) {
-          const c = this.channels[k];
-          if (c.type === 'RECORD' || c.type === 'RECORD_PLAY') {
-            c.transportStatus = 'RECORDING';
-            c.speed = 1.0;
-            c.tally.recording = true;
-            c.tally.onAir = false;
+        for (const c of recorderChannels) {
+          c.transportStatus = 'RECORDING';
+          c.speed = 1.0;
+          c.tally.recording = true;
+          c.tally.onAir = false;
 
-            const isoPrefix = c.id === 'Vtr1' ? 'CAM1' : c.id === 'Vtr2' ? 'CAM2' : 'CAM3';
-            c.activeClip = {
-              id: 'REC_' + k + '_' + Date.now(),
-              name: `${isoPrefix}_ISO_${timestamp}`,
-              duration: '00:00:00:00',
-              durationFrames: 0,
-              inPoint: c.timecode,
-              outPoint: c.timecode,
-              format: 'Grass Valley HQX',
-              fps: c.fps,
-              resolution: '1920x1080i',
-              date: new Date().toLocaleString(),
-              bin: `REC_BIN_${c.id}`,
-            };
-            this.clips.unshift(c.activeClip);
-          }
+          const isoPrefix = c.id === 'Vtr1' ? 'CAM1' : 'CAM2';
+          c.activeClip = {
+            id: 'REC_' + c.id + '_' + Date.now(),
+            name: `${isoPrefix}_ISO_${timestamp}`,
+            duration: '00:00:00:00',
+            durationFrames: 0,
+            inPoint: c.timecode,
+            outPoint: c.timecode,
+            format: 'Grass Valley HQX',
+            fps: c.fps,
+            resolution: '1920x1080i',
+            date: new Date().toLocaleString(),
+            bin: `REC_BIN_${c.id}`,
+          };
+          this.clips.unshift(c.activeClip);
         }
-        this.logPacket('TX', `CMDS0004${cmdHex}`, 'RECORD ALL command sent to T3 (3 Recorders)');
-        this.logPacket('RX', '1001', 'ACK: R1, R2, R3 recording in sync');
+        this.logPacket('TX', `CMDS0004${cmdHex}`, 'RECORD ALL command sent to recorder channels');
+        this.logPacket('RX', '1001', 'ACK: R1 and R2 recording');
         break;
       }
 
@@ -1014,14 +1161,15 @@ class GrassValleyAmpService {
 
       case 'play_all': {
         const cmdHex = AMP_COMMANDS.PLAY;
-        this.logPacket('SYS', 'PLAY_ALL', 'PLAY ALL issued across all playout channels');
+        const playerChannels = Object.values(this.channels)
+          .filter((channel) => channel.type === 'PLAY' || channel.type === 'RECORD_PLAY');
+        this.logPacket('SYS', 'PLAY_ALL', `PLAY ALL issued across ${playerChannels.map((channel) => channel.label.split(' ')[0]).join(', ')}`);
         if (this.mode === 'hardware') {
-          for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
-            this.sendHardwareCommand(cmdHex, chId);
+          for (const channel of playerChannels) {
+            this.sendHardwareCommand(cmdHex, channel.id);
           }
         }
-        for (const k of Object.keys(this.channels)) {
-          const c = this.channels[k];
+        for (const c of playerChannels) {
           c.transportStatus = 'PLAYING';
           c.speed = 1.0;
           c.shuttleRate = 1.0;
@@ -1135,7 +1283,9 @@ class GrassValleyAmpService {
         const cmdHex = isFwd ? AMP_COMMANDS.shuttleFwd(speedObj.hex) : AMP_COMMANDS.shuttleRev(speedObj.hex);
 
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
+          ch.transportStatus = isFwd ? 'FF' : 'RW';
+          ch.shuttleRate = rate;
         } else {
           ch.transportStatus = isFwd ? 'FF' : 'RW';
           ch.shuttleRate = rate;
@@ -1152,7 +1302,7 @@ class GrassValleyAmpService {
         const cmdHex = isFwd ? AMP_COMMANDS.jogFwd(count) : AMP_COMMANDS.jogRev(count);
 
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
           ch.transportStatus = 'STILL';
           ch.currentFrames = Math.max(0, ch.currentFrames + frames);
@@ -1165,9 +1315,21 @@ class GrassValleyAmpService {
 
       case 'cue_timecode': {
         const tc = params.timecode || '00:00:00:00';
+        const [hours, minutes, seconds, frames] = /^\d{2}:\d{2}:\d{2}:\d{2}$/.test(tc)
+          ? tc.split(':').map(Number)
+          : [];
+        if (
+          hours === undefined
+          || hours > 23
+          || minutes > 59
+          || seconds > 59
+          || frames >= Math.ceil(ch.fps || 30)
+        ) {
+          return { success: false, error: 'Timecode must use HH:MM:SS:FF format' };
+        }
         const cmdHex = AMP_COMMANDS.cueTimecode(tc);
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
           ch.transportStatus = 'STOPPED';
           ch.timecode = tc;
@@ -1180,23 +1342,38 @@ class GrassValleyAmpService {
 
       case 'load_clip': {
         const clip = this.clips.find((c) => c.id === params.clipId || c.name === params.clipName);
-        if (clip) {
-          ch.activeClip = clip;
-          ch.timecode = clip.inPoint || '00:00:00:00';
-          ch.inPoint = clip.inPoint || '00:00:00:00';
-          ch.outPoint = clip.outPoint || clip.duration;
-          ch.currentFrames = timecodeToFrames(ch.timecode, ch.fps);
-          ch.transportStatus = 'STOPPED';
+        const clipName = String(params.clipName || clip?.name || '').trim();
+        if (!clipName || clipName.length > 128 || /[^\x20-\x7e]/.test(clipName)) {
+          return { success: false, error: 'Enter a clip name using 1–128 printable ASCII characters' };
+        }
+        const loadedClip = clip || {
+          id: clipName,
+          name: clipName,
+          duration: 'Unknown',
+          format: 'T3 media',
+          fps: ch.fps,
+          resolution: 'Unknown',
+          bin: 'T3',
+        };
+        ch.activeClip = loadedClip;
+        ch.timecode = clip?.inPoint || '00:00:00:00';
+        ch.inPoint = clip?.inPoint || '00:00:00:00';
+        ch.outPoint = clip?.outPoint || clip?.duration || '00:00:00:00';
+        ch.currentFrames = timecodeToFrames(ch.timecode, ch.fps);
+        ch.transportStatus = 'STOPPED';
 
-          const cmdHex = AMP_COMMANDS.loadClip(clip.name);
-          if (this.mode === 'hardware') {
-            this.sendHardwareCommand(cmdHex);
-          } else {
-            this.logPacket('TX', `CMDS${cmdHex.length}${cmdHex}`, `LOAD CLIP: "${clip.name}" onto ${ch.id}`);
-            this.logPacket('RX', '1001', `ACK: Clip loaded. Duration: ${clip.duration}`);
-          }
+        const cmdHex = AMP_COMMANDS.loadClip(clipName);
+        if (this.mode === 'hardware') {
+          this.sendHardwareCommand(cmdHex, targetChannel);
+        } else {
+          this.logPacket('TX', `CMDS${cmdHex.length}${cmdHex}`, `LOAD CLIP: "${clipName}" onto ${ch.id}`);
+          this.logPacket('RX', '1001', `ACK: Clip load requested on ${ch.id}`);
         }
         break;
+      }
+
+      case 'sync_clips': {
+        return this.refreshClipDirectory(targetChannel);
       }
 
       case 'set_loop': {
@@ -1204,7 +1381,7 @@ class GrassValleyAmpService {
         ch.loop = enabled;
         const cmdHex = enabled ? AMP_COMMANDS.LOOP_ON : AMP_COMMANDS.LOOP_OFF;
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
           this.logPacket('TX', `CMDS0006${cmdHex}`, `SET LOOP: ${enabled ? 'ON' : 'OFF'} on ${ch.id}`);
           this.logPacket('RX', '1001', `ACK: Loop mode ${enabled ? 'active' : 'disabled'}`);
@@ -1294,11 +1471,35 @@ if (!globalThis._gvAmpService) {
   if (!globalThis._gvAmpService.sockets) globalThis._gvAmpService.sockets = {};
   if (!globalThis._gvAmpService.channelHeartbeats) globalThis._gvAmpService.channelHeartbeats = {};
   if (!globalThis._gvAmpService.pendingHardwareCommands) globalThis._gvAmpService.pendingHardwareCommands = {};
+  if (!globalThis._gvAmpService.hardwareResponseBuffers) globalThis._gvAmpService.hardwareResponseBuffers = {};
   if (!globalThis._gvAmpService.channelReconnectTimers) globalThis._gvAmpService.channelReconnectTimers = {};
   if (!globalThis._gvAmpService.channelReconnectAttempts) globalThis._gvAmpService.channelReconnectAttempts = {};
+  if (!globalThis._gvAmpService.clipListSource) {
+    globalThis._gvAmpService.clips = [];
+    globalThis._gvAmpService.clipListSource = 't3';
+  }
+  if (globalThis._gvAmpService.clipListLoading === undefined) globalThis._gvAmpService.clipListLoading = false;
+  if (globalThis._gvAmpService.clipListError === undefined) globalThis._gvAmpService.clipListError = null;
+  if (globalThis._gvAmpService.clipListUpdatedAt === undefined) globalThis._gvAmpService.clipListUpdatedAt = null;
+  if (globalThis._gvAmpService.clipDirectorySync === undefined) globalThis._gvAmpService.clipDirectorySync = null;
   if (globalThis._gvAmpService.mode === 'hardware') {
     globalThis._gvAmpService.connectHardwareSocket();
   }
+}
+
+for (const [channelId, role] of Object.entries(CHANNEL_ROLES)) {
+  Object.assign(globalThis._gvAmpService.channels[channelId], role);
+}
+
+if (globalThis._gvAmpService.channels.Vtr3.activeClip?.id === 'REC_CAM3') {
+  globalThis._gvAmpService.channels.Vtr3.activeClip = null;
+}
+if (globalThis._gvAmpService.mode === 'hardware' && globalThis._gvAmpService.clipListSource !== 't3') {
+  globalThis._gvAmpService.clips = [];
+  globalThis._gvAmpService.clipListSource = 't3';
+  globalThis._gvAmpService.clipListLoading = false;
+  globalThis._gvAmpService.clipListError = null;
+  globalThis._gvAmpService.clipListUpdatedAt = null;
 }
 
 export const ampService = globalThis._gvAmpService;

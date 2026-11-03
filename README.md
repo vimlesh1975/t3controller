@@ -11,10 +11,10 @@ A professional, broadcast-grade software control surface for the **Grass Valley 
 ## 🌟 Key Features
 
 ### 1. Multi-Channel Deck Architecture
-Matches the native Grass Valley T3 iDDR 3-channel topology:
-- **CH 1: R1 (Record & Playout)**: Full recording and playout with instant live clip creation.
-- **CH 2: P1 (Playout 1)**: Primary program/air playout deck with loop and cue points.
-- **CH 3: P2 (Playout 2)**: Secondary preview/aux playout deck.
+Configured as two recorder channels and one player channel:
+- **CH 1: R1 (Recorder 1)**: Recording controls and optional split recording.
+- **CH 2: R2 (Recorder 2)**: Recording controls and optional split recording.
+- **CH 3: P1 (Player 1)**: Playout controls.
 
 ### 2. Broadcast Transport Panel
 - **Tactile Illuminated Pushbuttons** with hardware tally feedback:
@@ -22,11 +22,17 @@ Matches the native Grass Valley T3 iDDR 3-channel topology:
   - Per-channel split recording: continuously record into consecutive clips using a configurable interval (10 seconds by default) until stopped
   - `PLAY` (Bright illuminated green tally)
   - `STOP` (Illuminated amber tally)
+  - P1 player controls to load a T3 clip by name, cue to SMPTE timecode, jog one frame, shuttle at 2x, and toggle looping
   - `STILL / PAUSE` (Illuminated blue tally)
   - `REW (<<)` & `FF (>>)` (Variable shuttle rewind/fast forward)
   - `LOOP` (Illuminated cyan continuous loop tally)
   - `EJECT`
 - **Broadcast Keyboard Shortcuts**:
+  - <kbd>1</kbd> / <kbd>2</kbd>: Toggle recording on R1 / R2
+  - <kbd>3</kbd>: Toggle playback on P1
+  - <kbd>R</kbd>: Record All (R1 + R2)
+  - <kbd>P</kbd>: Play All (P1)
+  - <kbd>S</kbd> / <kbd>Esc</kbd>: Stop All
   - <kbd>Space</kbd>: Play / Stop toggle
   - <kbd>K</kbd>: Stop
   - <kbd>J</kbd>: Shuttle Reverse (-2x / -4x)
@@ -45,10 +51,9 @@ Matches the native Grass Valley T3 iDDR 3-channel topology:
 - **Dual-Channel Audio VU Meters**: Calibrated stereo scale (-48 dBFS to 0 dBFS) with green/amber/red peak clip indicators.
 
 ### 5. Clip Bin & Media Library
-- List clips stored on the T3 server storage with metadata (Duration, Codec, Resolution, Date, Bin).
-- Direct `Load to R1`, `Load to P1`, `Load to P2` actions.
+- Request the T3 clip directory using AMP `A2.14` / `A1.15`; IDs reported as loaded by the connected decks are also kept in the searchable list if directory listing is unavailable.
+- Click a listed clip or drag it onto the P1 deck to load it for playback. Enter a clip name manually when needed.
 - `New Rec` creator: Set clip name and immediately trigger recording on Channel 1.
-- `Sync`: Query live clip directory from T3 (`A2140000` / `A115FF`).
 
 ### 6. Live AMP Protocol Inspector
 - Terminal view showing raw hex packets exchanged in real time:
