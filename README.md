@@ -125,3 +125,4 @@ npm start
 4. Select the initial target channel (`Vtr1`, `Vtr2`, or `Vtr3`).
 5. Click **Connect to T3 Hardware**.
 6. Ensure that **AMP Remote Control** is enabled in Grass Valley T3 Workstation settings under *Remote Protocol Settings*.
+7. If a recorder is switched to remote mode after the app starts, the controller detects rejected AMP binds/status queries and retries that recorder's connection automatically.

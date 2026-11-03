@@ -203,6 +203,8 @@ class GrassValleyAmpService {
     this.sockets = {};
     this.channelHeartbeats = {};
     this.pendingHardwareCommands = {};
+    this.channelReconnectTimers = {};
+    this.channelReconnectAttempts = {};
     this.socket = null;
     this.heartbeatTimer = null;
     this.simulationTimer = null;
@@ -377,6 +379,7 @@ class GrassValleyAmpService {
 
     socket.connect(this.port, this.host, () => {
       if (this.sockets[channelId] !== socket) return;
+      socket.connectedAt = Date.now();
       this.isConnected = true;
       this.connectionState = 'connected';
       this.lastError = null;
@@ -428,6 +431,25 @@ class GrassValleyAmpService {
         }, 2500);
       }
     });
+  }
+
+  scheduleChannelReconnect(channelId, reason = 'T3 rejected the channel bind') {
+    if (this.channelReconnectTimers[channelId] || this.mode !== 'hardware') return;
+
+    const attempt = (this.channelReconnectAttempts[channelId] || 0) + 1;
+    this.channelReconnectAttempts[channelId] = attempt;
+    const delay = Math.min(2500 * (2 ** (attempt - 1)), 15000);
+    this.logPacket(
+      'SYS',
+      `REBIND_RETRY_${channelId}`,
+      `${reason} on ${channelId}; retrying connection in ${delay} ms (attempt ${attempt})`
+    );
+    this.channelReconnectTimers[channelId] = setTimeout(() => {
+      delete this.channelReconnectTimers[channelId];
+      if (this.mode !== 'hardware') return;
+      this.logPacket('SYS', `REBIND_CONNECT_${channelId}`, `Retrying T3 channel bind on ${channelId}`);
+      this.connectChannelSocket(channelId, true);
+    }, delay);
   }
 
   startChannelHeartbeat(channelId) {
@@ -504,6 +526,9 @@ class GrassValleyAmpService {
 
   writeHardwareCommand(socket, channelId, cmdHex) {
     const packet = buildCmdsPacket(cmdHex);
+    if (cmdHex === AMP_COMMANDS.STATUS_SENSE) {
+      socket.statusSenseSentAt = Date.now();
+    }
     this.logPacket('TX', packet.trim(), `AMP [${channelId}]: ${cmdHex}`);
     socket.write(packet);
     return true;
@@ -731,11 +756,22 @@ class GrassValleyAmpService {
         this.logPacket('RX', '1001', `ACK [${chId}] (Command Accepted)`);
       } else if (head === '1111' || head === '2222' || head === '1112') {
         this.logPacket('RX', frame, `NAK [${chId}] (Command Rejected)`);
+        const socket = this.sockets[chId];
+        const statusSenseRejected = socket?.statusSenseSentAt
+          && Date.now() - socket.statusSenseSentAt <= 1000;
+        if (socket) socket.statusSenseSentAt = null;
+        if (socket && Date.now() - (socket.connectedAt || 0) <= 300) {
+          this.scheduleChannelReconnect(chId, 'CRAT channel bind was rejected');
+        } else if (statusSenseRejected) {
+          this.scheduleChannelReconnect(chId, 'T3 rejected status sense before channel became responsive');
+        }
       } else if (head === '7220' && frame.length >= 8) {
         // Status Sense reply: 72 20 <byte0> <byte1> — transport bits in byte1
         const statusByte = parseInt(frame.substr(6, 2), 16);
         const parsed = parseTransportStatus(statusByte);
         if (ch) {
+          const socket = this.sockets[chId];
+          if (socket) socket.statusSenseSentAt = null;
           const previousHardwareStatus = ch.hardwareTransportStatus;
           if (parsed.isRecording) {
             ch.transportStatus = 'RECORDING';
@@ -757,6 +793,7 @@ class GrassValleyAmpService {
             ch.tally.onAir = false;
           }
           ch.hardwareTransportStatus = ch.transportStatus;
+          this.channelReconnectAttempts[chId] = 0;
           const statusChanged = previousHardwareStatus !== ch.hardwareTransportStatus;
           const lastIntervalStatusLog = this.lastIntervalStatusLog?.[chId] || 0;
           if (statusChanged || (ch.intervalRecording && Date.now() - lastIntervalStatusLog >= 1000)) {
@@ -1257,6 +1294,8 @@ if (!globalThis._gvAmpService) {
   if (!globalThis._gvAmpService.sockets) globalThis._gvAmpService.sockets = {};
   if (!globalThis._gvAmpService.channelHeartbeats) globalThis._gvAmpService.channelHeartbeats = {};
   if (!globalThis._gvAmpService.pendingHardwareCommands) globalThis._gvAmpService.pendingHardwareCommands = {};
+  if (!globalThis._gvAmpService.channelReconnectTimers) globalThis._gvAmpService.channelReconnectTimers = {};
+  if (!globalThis._gvAmpService.channelReconnectAttempts) globalThis._gvAmpService.channelReconnectAttempts = {};
   if (globalThis._gvAmpService.mode === 'hardware') {
     globalThis._gvAmpService.connectHardwareSocket();
   }
