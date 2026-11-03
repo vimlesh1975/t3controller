@@ -19,6 +19,7 @@ Matches the native Grass Valley T3 iDDR 3-channel topology:
 ### 2. Broadcast Transport Panel
 - **Tactile Illuminated Pushbuttons** with hardware tally feedback:
   - `REC` (Bright illuminated red tally)
+  - Per-channel split recording: continuously record into consecutive clips using a configurable interval (10 seconds by default) until stopped
   - `PLAY` (Bright illuminated green tally)
   - `STOP` (Illuminated amber tally)
   - `STILL / PAUSE` (Illuminated blue tally)
@@ -54,6 +55,7 @@ Matches the native Grass Valley T3 iDDR 3-channel topology:
   - Direction: `TX` (Client -> T3), `RX` (T3 -> Client), `SYS` (Internal events).
   - Hex codes (`CRAT0007204Vtr1`, `CMDS00042001`, `1001 ACK`, `1111 NAK`, `722002`).
   - Human-readable parsing of every transaction.
+  - Persistent JSONL log at `logs/amp.log` (override with `AMP_LOG_PATH`).
 - Raw Hex Command Sender with one-click broadcast macro buttons.
 
 ### 7. Dual Engine Mode: Real Hardware + Virtual Simulator

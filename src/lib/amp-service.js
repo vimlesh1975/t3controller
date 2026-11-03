@@ -4,6 +4,8 @@
  */
 
 import net from 'net';
+import fs from 'fs';
+import path from 'path';
 import {
   buildCratPacket,
   buildCmdsPacket,
@@ -129,6 +131,9 @@ class GrassValleyAmpService {
         audioL: -18,
         audioR: -19,
         tally: { onAir: false, recording: false, cued: true },
+        intervalRecording: false,
+        intervalPhase: null,
+        intervalSegment: 0,
       },
       Vtr2: {
         id: 'Vtr2',
@@ -156,6 +161,9 @@ class GrassValleyAmpService {
         audioL: -20,
         audioR: -21,
         tally: { onAir: false, recording: false, cued: true },
+        intervalRecording: false,
+        intervalPhase: null,
+        intervalSegment: 0,
       },
       Vtr3: {
         id: 'Vtr3',
@@ -183,6 +191,9 @@ class GrassValleyAmpService {
         audioL: -22,
         audioR: -22,
         tally: { onAir: false, recording: false, cued: true },
+        intervalRecording: false,
+        intervalPhase: null,
+        intervalSegment: 0,
       },
     };
 
@@ -191,9 +202,11 @@ class GrassValleyAmpService {
     this.subscribers = new Set();
     this.sockets = {};
     this.channelHeartbeats = {};
+    this.pendingHardwareCommands = {};
     this.socket = null;
     this.heartbeatTimer = null;
     this.simulationTimer = null;
+    this.intervalRecordings = {};
 
     // Start background simulation clock
     this.startSimulationClock();
@@ -201,7 +214,7 @@ class GrassValleyAmpService {
     // Auto-connect to hardware T3 on startup
     if (this.mode === 'hardware') {
       setTimeout(() => {
-        this.connectHardwareSocket();
+        if (this.mode === 'hardware') this.connectHardwareSocket();
       }, 500);
     }
 
@@ -212,6 +225,7 @@ class GrassValleyAmpService {
   logPacket(direction, hex, parsed) {
     const entry = {
       id: Date.now() + Math.random().toString(36).substr(2, 4),
+      timestamp: new Date().toISOString(),
       time: new Date().toLocaleTimeString() + '.' + String(Date.now() % 1000).padStart(3, '0'),
       direction, // 'TX' | 'RX' | 'SYS'
       hex,
@@ -220,6 +234,30 @@ class GrassValleyAmpService {
     this.packetLogs.unshift(entry);
     if (this.packetLogs.length > 80) {
       this.packetLogs.pop();
+    }
+    try {
+      const isHeartbeatCommand = direction === 'TX'
+        && /AMP \[Vtr\d\]: (612002|610c04|a016)$/.test(parsed);
+      const isRepeatedNak = direction === 'RX'
+        && parsed.startsWith('NAK')
+        && Date.now() - (this.persistedNakTimes?.[parsed] || 0) < 5000;
+      if (direction === 'RX' && parsed.startsWith('NAK') && !isRepeatedNak) {
+        if (!this.persistedNakTimes) this.persistedNakTimes = {};
+        this.persistedNakTimes[parsed] = Date.now();
+      }
+      if (!isHeartbeatCommand && !isRepeatedNak) {
+        if (!this.ampLogStream || this.ampLogStream.destroyed) {
+          const logPath = process.env.AMP_LOG_PATH || path.join(process.cwd(), 'logs', 'amp.log');
+          fs.mkdirSync(path.dirname(logPath), { recursive: true });
+          this.ampLogStream = fs.createWriteStream(logPath, { flags: 'a' });
+          this.ampLogStream.on('error', (err) => {
+            console.error(`AMP log write failed (${logPath}):`, err);
+          });
+        }
+        this.ampLogStream.write(`${JSON.stringify(entry)}\n`);
+      }
+    } catch (err) {
+      console.error('AMP log write failed:', err);
     }
     // Only schedule subscriber notification if not already pending
     this.scheduleNotify();
@@ -269,9 +307,12 @@ class GrassValleyAmpService {
 
   // Set Connection Mode: 'simulator' or 'hardware'
   async configureConnection({ mode = 'hardware', host, port, channel = 'Vtr1' }) {
+    const nextHost = host || process.env.T3_HOST || process.env.NEXT_PUBLIC_T3_HOST || this.host || '192.168.145.20';
+    const nextPort = parseInt(port || process.env.T3_PORT || process.env.NEXT_PUBLIC_T3_PORT || this.port || '3811', 10);
+    const endpointChanged = nextHost !== this.host || nextPort !== this.port;
     this.activeChannel = channel;
-    this.host = host || process.env.T3_HOST || process.env.NEXT_PUBLIC_T3_HOST || this.host || '192.168.145.20';
-    this.port = parseInt(port || process.env.T3_PORT || process.env.NEXT_PUBLIC_T3_PORT || this.port || '3811', 10);
+    this.host = nextHost;
+    this.port = nextPort;
 
     if (mode === 'simulator') {
       if (this.socket) {
@@ -291,30 +332,34 @@ class GrassValleyAmpService {
 
     // Hardware mode
     this.mode = 'hardware';
-    this.connectionState = 'connecting';
+    if (endpointChanged || !Object.values(this.sockets).some((socket) => socket && !socket.destroyed)) {
+      this.connectionState = 'connecting';
+    }
     this.notifySubscribers();
-    return this.connectHardwareSocket();
+    return this.connectHardwareSocket(endpointChanged);
   }
 
   // Connect TCP sockets for all active channels (Vtr1, Vtr2, Vtr3) to real Grass Valley T3
-  async connectHardwareSocket() {
+  async connectHardwareSocket(forceReconnect = false) {
     if (!this.sockets) this.sockets = {};
     if (!this.channelHeartbeats) this.channelHeartbeats = {};
-    this.connectChannelSocket('Vtr1');
-    this.connectChannelSocket('Vtr2');
-    this.connectChannelSocket('Vtr3');
+    this.connectChannelSocket('Vtr1', forceReconnect);
+    this.connectChannelSocket('Vtr2', forceReconnect);
+    this.connectChannelSocket('Vtr3', forceReconnect);
     return { success: true, mode: 'hardware' };
   }
 
-  connectChannelSocket(channelId) {
+  connectChannelSocket(channelId, forceReconnect = false) {
     if (!this.sockets) this.sockets = {};
     if (!this.channelHeartbeats) this.channelHeartbeats = {};
     const hwName = CHANNEL_MAP[channelId] || channelId;
     if (this.sockets[channelId]) {
       const old = this.sockets[channelId];
+      if (!forceReconnect && !old.destroyed) return;
       // Detach listeners first so the old socket's 'close' cannot clobber the new one
       old.removeAllListeners('close');
       old.removeAllListeners('data');
+      old.removeAllListeners('connect');
       try {
         old.destroy();
       } catch (e) {}
@@ -331,6 +376,7 @@ class GrassValleyAmpService {
     socket.setKeepAlive(true, 5000);
 
     socket.connect(this.port, this.host, () => {
+      if (this.sockets[channelId] !== socket) return;
       this.isConnected = true;
       this.connectionState = 'connected';
       this.lastError = null;
@@ -340,6 +386,7 @@ class GrassValleyAmpService {
       const crat = buildCratPacket(hwName);
       this.logPacket('TX', crat.trim(), `CRAT [${channelId}]: Connect to ${hwName}`);
       socket.write(crat);
+      this.flushPendingHardwareCommands(channelId, socket);
 
       // Start periodic status, timecode and clip-name polling for this channel
       this.startChannelHeartbeat(channelId);
@@ -421,19 +468,219 @@ class GrassValleyAmpService {
     const target = channelId || this.activeChannel || 'Vtr1';
     const sock = this.sockets[target];
     if (!sock || sock.destroyed) {
-      this.logPacket('SYS', 'ERR_NO_SOCKET', `Channel ${target} socket not ready. Reconnecting...`);
+      this.queueHardwareCommand(target, cmdHex);
+      this.logPacket('SYS', 'CMD_QUEUED', `AMP [${target}]: Queued command until channel connects`);
       this.connectChannelSocket(target);
-      return false;
+      return true;
+    }
+    if (sock.connecting) {
+      this.queueHardwareCommand(target, cmdHex);
+      this.logPacket('SYS', 'CMD_QUEUED', `AMP [${target}]: Queued command until channel connects`);
+      return true;
     }
     try {
-      const packet = buildCmdsPacket(cmdHex);
-      this.logPacket('TX', packet.trim(), `AMP [${target}]: ${cmdHex}`);
-      sock.write(packet);
-      return true;
+      return this.writeHardwareCommand(sock, target, cmdHex);
     } catch (err) {
       this.logPacket('SYS', 'ERR_WRITE', `Socket write error [${target}]: ${err.message}`);
       return false;
     }
+  }
+
+  queueHardwareCommand(channelId, cmdHex) {
+    if (!this.pendingHardwareCommands[channelId]) {
+      this.pendingHardwareCommands[channelId] = [];
+    }
+    this.pendingHardwareCommands[channelId].push(cmdHex);
+  }
+
+  flushPendingHardwareCommands(channelId, socket) {
+    const commands = this.pendingHardwareCommands[channelId] || [];
+    delete this.pendingHardwareCommands[channelId];
+    for (const cmdHex of commands) {
+      if (this.sockets[channelId] !== socket || socket.destroyed) break;
+      this.writeHardwareCommand(socket, channelId, cmdHex);
+    }
+  }
+
+  writeHardwareCommand(socket, channelId, cmdHex) {
+    const packet = buildCmdsPacket(cmdHex);
+    this.logPacket('TX', packet.trim(), `AMP [${channelId}]: ${cmdHex}`);
+    socket.write(packet);
+    return true;
+  }
+
+  createIntervalClip(channelId) {
+    const ch = this.channels[channelId];
+    const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const clip = {
+      id: `IR_${channelId}_${Date.now()}`,
+      name: `${channelId.toUpperCase()}_IR_${timestamp}`,
+      duration: '00:00:00:00',
+      durationFrames: 0,
+      inPoint: ch.timecode,
+      outPoint: ch.timecode,
+      format: 'Grass Valley HQX',
+      fps: ch.fps,
+      resolution: '1920x1080i',
+      date: new Date().toLocaleString(),
+      bin: `REC_BIN_${channelId}`,
+    };
+
+    ch.activeClip = clip;
+    this.clips.unshift(clip);
+    return clip;
+  }
+
+  startIntervalSegment(channelId, { initial = false } = {}) {
+    const ch = this.channels[channelId];
+    const clip = initial && this.mode === 'hardware' ? null : this.createIntervalClip(channelId);
+    ch.transportStatus = 'RECORDING';
+    ch.speed = 1.0;
+    ch.tally.recording = true;
+    ch.tally.onAir = false;
+    ch.intervalPhase = 'recording';
+    ch.intervalSegment = (ch.intervalSegment || 0) + 1;
+    this.intervalRecordings[channelId].startedAt = Date.now();
+    this.intervalRecordings[channelId].startFrames = ch.currentFrames;
+
+    if (this.mode === 'hardware') {
+      if (!this.sendHardwareCommand(AMP_COMMANDS.RECORD, channelId)) {
+        this.stopFailedIntervalRecording(channelId, clip);
+        return false;
+      }
+    } else {
+      this.logPacket('TX', `CMDS0004${AMP_COMMANDS.RECORD}`, `INTERVAL RECORD [${channelId}]: ${clip?.name || 'current clip'}`);
+      this.logPacket('RX', '1001', `ACK: Recording started [${clip.name}]`);
+    }
+    this.notifySubscribers();
+    return true;
+  }
+
+  stopFailedIntervalRecording(channelId, clip) {
+    const interval = this.intervalRecordings[channelId];
+    if (interval?.timer) clearTimeout(interval.timer);
+    delete this.intervalRecordings[channelId];
+
+    const ch = this.channels[channelId];
+    ch.intervalRecording = false;
+    ch.intervalPhase = null;
+    ch.intervalSegment = 0;
+    ch.transportStatus = 'STOPPED';
+    ch.speed = 0;
+    ch.tally.recording = false;
+    ch.tally.onAir = false;
+    if (clip) {
+      this.clips = this.clips.filter((item) => item.id !== clip.id);
+      if (ch.activeClip?.id === clip.id) ch.activeClip = null;
+    }
+    this.logPacket('SYS', 'ERR_INTERVAL_RECORD', `Could not start interval recording on ${channelId}; check the channel connection`);
+    this.notifySubscribers();
+  }
+
+  finishIntervalSegment(channelId) {
+    const ch = this.channels[channelId];
+    const interval = this.intervalRecordings[channelId];
+    if (!ch || !interval) return;
+
+    const elapsedFrames = Math.max(0, Math.round(((Date.now() - interval.startedAt) / 1000) * (ch.fps || 29.97)));
+    const clip = ch.activeClip;
+    if (clip && clip.id.startsWith(`IR_${channelId}_`)) {
+      clip.durationFrames = elapsedFrames;
+      clip.duration = framesToTimecode(elapsedFrames, ch.fps);
+      clip.outPoint = framesToTimecode((interval.startFrames || 0) + elapsedFrames, ch.fps);
+    }
+
+    const stopSent = this.sendHardwareOrSimulatorCommand(
+      AMP_COMMANDS.STOP,
+      channelId,
+      `Split clip stopped on ${channelId}`
+    );
+    if (!stopSent) {
+      this.stopFailedIntervalRecording(channelId, null);
+      return;
+    }
+
+    ch.intervalPhase = 'restarting';
+    const restartDelay = this.mode === 'hardware' ? 500 : 0;
+    interval.timer = setTimeout(() => {
+      if (this.intervalRecordings[channelId] !== interval) return;
+      if (!this.startIntervalSegment(channelId)) return;
+      interval.timer = setTimeout(() => this.finishIntervalSegment(channelId), interval.intervalMs);
+    }, restartDelay);
+  }
+
+  sendHardwareOrSimulatorCommand(cmdHex, channelId, description) {
+    const ch = this.channels[channelId];
+    ch.transportStatus = 'STOPPED';
+    ch.speed = 0;
+    ch.tally.recording = false;
+    ch.tally.onAir = false;
+    if (this.mode === 'hardware') {
+      return this.sendHardwareCommand(cmdHex, channelId);
+    } else {
+      this.logPacket('TX', `CMDS${cmdHex.length.toString(16).padStart(4, '0')}${cmdHex}`, description);
+      this.logPacket('RX', '1001', 'ACK: Transport stopped');
+      return true;
+    }
+  }
+
+  stopIntervalRecording(channelId) {
+    const interval = this.intervalRecordings[channelId];
+    if (!interval) return false;
+
+    clearTimeout(interval.timer);
+    delete this.intervalRecordings[channelId];
+    const ch = this.channels[channelId];
+    const wasRecording = ch.intervalPhase === 'recording';
+    ch.intervalRecording = false;
+    ch.intervalPhase = null;
+    if (wasRecording) {
+      this.sendHardwareOrSimulatorCommand(AMP_COMMANDS.STOP, channelId, `Interval recording stopped on ${channelId}`);
+    }
+
+    if (wasRecording) {
+      const elapsedFrames = Math.max(0, Math.round(((Date.now() - interval.startedAt) / 1000) * (ch.fps || 29.97)));
+      const clip = ch.activeClip;
+      if (clip && clip.id.startsWith(`IR_${channelId}_`)) {
+        clip.durationFrames = elapsedFrames;
+        clip.duration = framesToTimecode(elapsedFrames, ch.fps);
+        clip.outPoint = framesToTimecode((interval.startFrames || 0) + elapsedFrames, ch.fps);
+      }
+    }
+    ch.intervalSegment = 0;
+    this.notifySubscribers();
+    return true;
+  }
+
+  startIntervalRecording(channelId, requestedIntervalSeconds = 10) {
+    const ch = this.channels[channelId];
+    if (!ch) return { success: false, error: `Channel ${channelId} not found` };
+    if (this.intervalRecordings[channelId]) return { success: true, channelState: ch };
+    if (ch.transportStatus === 'RECORDING') {
+      return { success: false, error: `${channelId} is already recording` };
+    }
+    const intervalSeconds = Number(requestedIntervalSeconds);
+    if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 2147483) {
+      return { success: false, error: 'Interval must be a whole number between 1 and 2,147,483 seconds' };
+    }
+
+    ch.intervalRecording = true;
+    ch.intervalPhase = 'recording';
+    this.intervalRecordings[channelId] = {
+      timer: null,
+      startedAt: Date.now(),
+      startFrames: ch.currentFrames,
+      intervalSeconds,
+      intervalMs: intervalSeconds * 1000,
+    };
+    if (!this.startIntervalSegment(channelId, { initial: true })) {
+      return { success: false, error: `Could not start interval recording on ${channelId}; check the channel connection` };
+    }
+    this.intervalRecordings[channelId].timer = setTimeout(
+      () => this.finishIntervalSegment(channelId),
+      this.intervalRecordings[channelId].intervalMs
+    );
+    return { success: true, channelState: ch };
   }
 
   /**
@@ -489,6 +736,7 @@ class GrassValleyAmpService {
         const statusByte = parseInt(frame.substr(6, 2), 16);
         const parsed = parseTransportStatus(statusByte);
         if (ch) {
+          const previousHardwareStatus = ch.hardwareTransportStatus;
           if (parsed.isRecording) {
             ch.transportStatus = 'RECORDING';
             ch.tally.recording = true;
@@ -508,6 +756,16 @@ class GrassValleyAmpService {
             ch.tally.recording = false;
             ch.tally.onAir = false;
           }
+          ch.hardwareTransportStatus = ch.transportStatus;
+          const statusChanged = previousHardwareStatus !== ch.hardwareTransportStatus;
+          const lastIntervalStatusLog = this.lastIntervalStatusLog?.[chId] || 0;
+          if (statusChanged || (ch.intervalRecording && Date.now() - lastIntervalStatusLog >= 1000)) {
+            this.logPacket('RX', frame, `STATUS [${chId}]: ${ch.transportStatus}`);
+            if (ch.intervalRecording) {
+              if (!this.lastIntervalStatusLog) this.lastIntervalStatusLog = {};
+              this.lastIntervalStatusLog[chId] = Date.now();
+            }
+          }
           changed = true;
         }
       } else if ((head === '7404' || head === '7400') && frame.length >= 12) {
@@ -523,13 +781,16 @@ class GrassValleyAmpService {
         const strLen = parseInt(frame.substr(8, 4), 16);
         const name = hex2str(frame.substr(12, strLen * 2));
         if (ch && name) {
-          if (!ch.activeClip) ch.activeClip = {};
-          if (ch.activeClip.name !== name) {
-            this.logPacket('RX', frame, `ID Loaded [${chId}]: ${name}`);
+          const isIntervalClip = ch.intervalRecording && ch.activeClip?.id.startsWith(`IR_${chId}_`);
+          if (!isIntervalClip) {
+            if (!ch.activeClip) ch.activeClip = {};
+            if (ch.activeClip.name !== name) {
+              this.logPacket('RX', frame, `ID Loaded [${chId}]: ${name}`);
+            }
+            ch.activeClip.name = name;
+            ch.activeClip.id = name;
+            ch.clipName = name;
           }
-          ch.activeClip.name = name;
-          ch.activeClip.id = name;
-          ch.clipName = name;
           changed = true;
         }
       } else {
@@ -589,9 +850,15 @@ class GrassValleyAmpService {
           ch.audioR = Math.max(-36, Math.min(-3, -12 + (Math.random() * 6 - 3)));
 
           if (ch.activeClip) {
-            ch.activeClip.durationFrames = Math.max(ch.activeClip.durationFrames, ch.currentFrames);
-            ch.activeClip.duration = framesToTimecode(ch.activeClip.durationFrames, fps);
-            ch.outPoint = ch.timecode;
+            const interval = this.intervalRecordings[key];
+            if (interval) {
+              ch.activeClip.durationFrames = Math.round(((Date.now() - interval.startedAt) / 1000) * fps);
+              ch.activeClip.duration = framesToTimecode(ch.activeClip.durationFrames, fps);
+            } else {
+              ch.activeClip.durationFrames = Math.max(ch.activeClip.durationFrames, ch.currentFrames);
+              ch.activeClip.duration = framesToTimecode(ch.activeClip.durationFrames, fps);
+              ch.outPoint = ch.timecode;
+            }
           }
         } else if (ch.transportStatus === 'FF' || ch.transportStatus === 'SHUTTLE') {
           const rate = ch.shuttleRate || 2.0;
@@ -638,6 +905,9 @@ class GrassValleyAmpService {
       case 'record_all': {
         const cmdHex = AMP_COMMANDS.RECORD;
         this.logPacket('SYS', 'REC_ALL', 'RECORD ALL issued across all recording channels');
+        for (const chId of Object.keys(this.intervalRecordings)) {
+          this.stopIntervalRecording(chId);
+        }
         if (this.mode === 'hardware') {
           for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
             this.sendHardwareCommand(cmdHex, chId);
@@ -677,6 +947,9 @@ class GrassValleyAmpService {
       case 'stop_all': {
         const cmdHex = AMP_COMMANDS.STOP;
         this.logPacket('SYS', 'STOP_ALL', 'STOP ALL issued across all channels');
+        for (const chId of Object.keys(this.intervalRecordings)) {
+          this.stopIntervalRecording(chId);
+        }
         if (this.mode === 'hardware') {
           for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
             this.sendHardwareCommand(cmdHex, chId);
@@ -684,11 +957,18 @@ class GrassValleyAmpService {
         }
         for (const k of Object.keys(this.channels)) {
           const c = this.channels[k];
+          if (this.intervalRecordings[k]) {
+            clearTimeout(this.intervalRecordings[k].timer);
+            delete this.intervalRecordings[k];
+          }
           c.transportStatus = 'STOPPED';
           c.speed = 0;
           c.shuttleRate = 0;
           c.tally.recording = false;
           c.tally.onAir = false;
+          c.intervalRecording = false;
+          c.intervalPhase = null;
+          c.intervalSegment = 0;
         }
         this.logPacket('TX', `CMDS0004${cmdHex}`, 'STOP ALL command sent');
         this.logPacket('RX', '1001', 'ACK: All channels stopped');
@@ -733,6 +1013,10 @@ class GrassValleyAmpService {
       }
 
       case 'stop': {
+        if (this.intervalRecordings[targetChannel]) {
+          this.stopIntervalRecording(targetChannel);
+          break;
+        }
         const cmdHex = AMP_COMMANDS.STOP;
         ch.transportStatus = 'STOPPED';
         ch.speed = 0;
@@ -749,6 +1033,9 @@ class GrassValleyAmpService {
       }
 
       case 'record': {
+        if (this.intervalRecordings[targetChannel]) {
+          this.stopIntervalRecording(targetChannel);
+        }
         const cmdHex = AMP_COMMANDS.RECORD;
         ch.transportStatus = 'RECORDING';
         ch.speed = 1.0;
@@ -779,6 +1066,17 @@ class GrassValleyAmpService {
 
           this.logPacket('TX', `CMDS0004${cmdHex}`, `RECORD command on ${ch.id}`);
           this.logPacket('RX', '1001', `ACK: Recording started [${ch.activeClip.name}]`);
+        }
+        break;
+      }
+
+      case 'start_interval_recording': {
+        return this.startIntervalRecording(targetChannel, params.intervalSeconds);
+      }
+
+      case 'stop_interval_recording': {
+        if (!this.stopIntervalRecording(targetChannel)) {
+          return { success: false, error: `${targetChannel} is not interval recording` };
         }
         break;
       }
@@ -958,6 +1256,7 @@ if (!globalThis._gvAmpService) {
   Object.setPrototypeOf(globalThis._gvAmpService, GrassValleyAmpService.prototype);
   if (!globalThis._gvAmpService.sockets) globalThis._gvAmpService.sockets = {};
   if (!globalThis._gvAmpService.channelHeartbeats) globalThis._gvAmpService.channelHeartbeats = {};
+  if (!globalThis._gvAmpService.pendingHardwareCommands) globalThis._gvAmpService.pendingHardwareCommands = {};
   if (globalThis._gvAmpService.mode === 'hardware') {
     globalThis._gvAmpService.connectHardwareSocket();
   }

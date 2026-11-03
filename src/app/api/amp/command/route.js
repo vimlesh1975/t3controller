@@ -16,7 +16,14 @@ export async function POST(request) {
     }
 
     const cmdParams = { ...(params || {}), channel: channel || params?.channel };
+    const targetChannel = cmdParams.channel || ampService.activeChannel;
+    ampService.logPacket('SYS', 'API_COMMAND', `API command received: ${action} [${targetChannel}]`);
     const result = ampService.executeCommand(action, cmdParams);
+    ampService.logPacket(
+      'SYS',
+      'API_RESULT',
+      `API command ${action} [${targetChannel}] ${result.success ? 'accepted' : `failed: ${result.error}`}`
+    );
     const snapshot = ampService.getStateSnapshot();
 
     return NextResponse.json({

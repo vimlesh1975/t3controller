@@ -6,7 +6,9 @@ module.exports = {
   apps: [
     {
       name: 't3-controller',
-      script: './server.js',
+      script: './node_modules/next/dist/bin/next',
+      args: 'dev -p 23000',
+      interpreter: 'node',
       cwd: __dirname,
       instances: 1, // Single instance required to preserve stateful TCP sockets to T3 hardware
       exec_mode: 'fork',

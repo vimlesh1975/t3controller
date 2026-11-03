@@ -8,6 +8,12 @@ const DEFAULT_PORT = parseInt(process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
 
 export default function CompactTripleChannelRecordPage() {
   const [deckState, setDeckState] = useState(null);
+  const [commandError, setCommandError] = useState('');
+  const [intervalSeconds, setIntervalSeconds] = useState({
+    Vtr1: '10',
+    Vtr2: '10',
+    Vtr3: '10',
+  });
 
   // Poll or SSE Stream connection
   useEffect(() => {
@@ -64,7 +70,7 @@ export default function CompactTripleChannelRecordPage() {
   }, []);
 
   // Send Command to Backend for specific channel or all with instant optimistic UI feedback
-  const sendCommand = useCallback(async (action, channel) => {
+  const sendCommand = useCallback(async (action, channel, params = {}) => {
     // Instant optimistic update so UI is immediately responsive
     if (channel) {
       setDeckState((prev) => {
@@ -76,6 +82,21 @@ export default function CompactTripleChannelRecordPage() {
         } else if (action === 'stop') {
           updatedCh.transportStatus = 'STOPPED';
           updatedCh.tally = { ...updatedCh.tally, recording: false, onAir: false };
+          updatedCh.intervalRecording = false;
+          updatedCh.intervalPhase = null;
+          updatedCh.intervalSegment = 0;
+        } else if (action === 'start_interval_recording') {
+          updatedCh.transportStatus = 'RECORDING';
+          updatedCh.tally = { ...updatedCh.tally, recording: true, onAir: false };
+          updatedCh.intervalRecording = true;
+          updatedCh.intervalPhase = 'recording';
+          updatedCh.intervalSegment = (updatedCh.intervalSegment || 0) + 1;
+        } else if (action === 'stop_interval_recording') {
+          updatedCh.transportStatus = 'STOPPED';
+          updatedCh.tally = { ...updatedCh.tally, recording: false, onAir: false };
+          updatedCh.intervalRecording = false;
+          updatedCh.intervalPhase = null;
+          updatedCh.intervalSegment = 0;
         }
         return {
           ...prev,
@@ -105,14 +126,21 @@ export default function CompactTripleChannelRecordPage() {
       const res = await fetch('/api/amp/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, channel }),
+        body: JSON.stringify({ action, channel, params }),
       });
       const data = await res.json();
+      if (!data.success) {
+        setCommandError(data.error || 'Command failed');
+        if (data.state) setDeckState(data.state);
+        return;
+      }
+      setCommandError('');
       if (data.state) {
         setDeckState(data.state);
       }
     } catch (err) {
       console.error('Command failed:', err);
+      setCommandError(err.message || 'Command failed');
     }
   }, []);
 
@@ -122,6 +150,14 @@ export default function CompactTripleChannelRecordPage() {
 
   const stopRecord = useCallback((channel) => {
     sendCommand('stop', channel);
+  }, [sendCommand]);
+
+  const toggleIntervalRecording = useCallback((channel, isActive, seconds) => {
+    sendCommand(
+      isActive ? 'stop_interval_recording' : 'start_interval_recording',
+      channel,
+      isActive ? {} : { intervalSeconds: Number(seconds) }
+    );
   }, [sendCommand]);
 
   const recordAll = useCallback(() => {
@@ -240,8 +276,9 @@ export default function CompactTripleChannelRecordPage() {
         borderRadius: '6px',
         padding: '8px 10px',
         display: 'flex',
-        justifyContent: 'space-between',
+        flexDirection: 'column',
         alignItems: 'center',
+        gap: '5px',
         border: `1px solid ${isRec ? 'rgba(239, 68, 68, 0.35)' : 'rgba(255, 255, 255, 0.05)'}`,
       }}>
         <div style={{
@@ -255,7 +292,10 @@ export default function CompactTripleChannelRecordPage() {
         }}>
           {ch.timecode || '00:00:00:00'}
         </div>
-        <div style={{ fontSize: '10px', color: '#94a3b8', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div
+          title={ch.activeClip?.name || `${chId}_001`}
+          style={{ fontSize: '10px', color: '#94a3b8', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
           <strong style={{ color: '#e2e8f0' }}>{ch.activeClip?.name || `${chId}_001`}</strong>
         </div>
       </div>
@@ -338,6 +378,79 @@ export default function CompactTripleChannelRecordPage() {
           </span>
         </button>
       </div>
+
+      <label
+        htmlFor={`${chId.toLowerCase()}-interval-seconds`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '10px',
+          marginTop: '8px',
+          color: '#cbd5e1',
+          fontSize: '12px',
+          fontWeight: 700,
+        }}
+      >
+        <span>Clip interval (seconds)</span>
+        <input
+          id={`${chId.toLowerCase()}-interval-seconds`}
+          type="number"
+          min="1"
+          max="2147483"
+          step="1"
+          value={intervalSeconds[chId]}
+          disabled={Boolean(ch.intervalRecording)}
+          onChange={(event) => {
+            const value = event.target.value;
+            setIntervalSeconds((previous) => ({ ...previous, [chId]: value }));
+          }}
+          style={{
+            width: '84px',
+            padding: '6px 8px',
+            border: '1px solid rgba(255, 255, 255, 0.18)',
+            borderRadius: '6px',
+            background: '#04060a',
+            color: '#f8fafc',
+            fontSize: '13px',
+          }}
+        />
+      </label>
+
+      <button
+        type="button"
+        id={`btn-${chId.toLowerCase()}-interval-record`}
+        onClick={() => toggleIntervalRecording(chId, Boolean(ch.intervalRecording), intervalSeconds[chId])}
+        disabled={isRec && !ch.intervalRecording}
+        title={isRec && !ch.intervalRecording
+          ? 'Stop the current recording before starting interval recording'
+          : `Continuously record, splitting the recording into ${intervalSeconds[chId]}-second clips`}
+        style={{
+          background: ch.intervalPhase === 'recording'
+            ? 'linear-gradient(180deg, #7f1d1d 0%, #450a0a 100%)'
+            : 'linear-gradient(180deg, #334155 0%, #1e293b 100%)',
+          border: `1.5px solid ${ch.intervalPhase === 'recording' ? '#f87171' : 'rgba(255, 255, 255, 0.18)'}`,
+          borderRadius: '8px',
+          padding: '9px 12px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '8px',
+          color: isRec && !ch.intervalRecording ? '#64748b' : '#f8fafc',
+          cursor: isRec && !ch.intervalRecording ? 'not-allowed' : 'pointer',
+          fontSize: '12px',
+          fontWeight: 800,
+          letterSpacing: '0.5px',
+          opacity: isRec && !ch.intervalRecording ? 0.6 : 1,
+        }}
+      >
+        <Disc size={14} />
+        <span>
+          {ch.intervalRecording
+            ? `STOP SPLIT RECORDING · CLIP ${ch.intervalSegment || 1}`
+            : `START ${intervalSeconds[chId] || 0}s SPLIT RECORDING`}
+        </span>
+      </button>
     </div>
   );
 
@@ -397,6 +510,19 @@ export default function CompactTripleChannelRecordPage() {
             <span>{host}:{port}</span>
           </div>
         </div>
+
+        {commandError && (
+          <div role="alert" style={{
+            padding: '9px 12px',
+            border: '1px solid rgba(248, 113, 113, 0.5)',
+            borderRadius: '6px',
+            background: 'rgba(127, 29, 29, 0.25)',
+            color: '#fca5a5',
+            fontSize: '12px',
+          }}>
+            {commandError}
+          </div>
+        )}
 
         {/* Global Master Quick Controls (Compact Row) */}
         <div style={{
