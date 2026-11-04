@@ -1,5 +1,7 @@
 # Grass Valley T3 iDDR Broadcast Controller (Next.js & AMP Protocol)
 
+![Grass Valley T3 Controller](./image.png)
+
 A professional, broadcast-grade software control surface for the **Grass Valley T3 iDDR** (and T2 / K2 media servers) built with **Next.js (JavaScript / React)** and the **Advanced Media Protocol (AMP)** over TCP port **3811**.
 
 ![Grass Valley T3 Controller](https://img.shields.io/badge/Grass_Valley-T3_iDDR-0084ff?style=for-the-badge)

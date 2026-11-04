@@ -5,6 +5,7 @@ import { Circle, Square, Disc, RefreshCw } from 'lucide-react';
 
 const DEFAULT_HOST = process.env.NEXT_PUBLIC_T3_HOST || '192.168.145.20';
 const DEFAULT_PORT = parseInt(process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
+const INTERVAL_STORAGE_KEY = 't3_interval_seconds';
 
 export default function CompactTripleChannelRecordPage() {
   const [deckState, setDeckState] = useState(null);
@@ -19,16 +20,52 @@ export default function CompactTripleChannelRecordPage() {
   const [clipSearch, setClipSearch] = useState('');
   const [dragOverPlayer, setDragOverPlayer] = useState(false);
 
+  // Restore saved interval recording durations from localStorage on mount
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(INTERVAL_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          setIntervalSeconds((prev) => ({
+            Vtr1: parsed.Vtr1 ? String(parsed.Vtr1) : prev.Vtr1,
+            Vtr2: parsed.Vtr2 ? String(parsed.Vtr2) : prev.Vtr2,
+            Vtr3: parsed.Vtr3 ? String(parsed.Vtr3) : prev.Vtr3,
+          }));
+        }
+      }
+    } catch (err) {}
+  }, []);
+
   // Poll or SSE Stream connection
   useEffect(() => {
     let eventSource = null;
     let pollInterval = null;
+    let hydratedIntervals = false;
+
+    const syncSavedIntervalsFromServer = (data) => {
+      if (hydratedIntervals || !data?.channels) return;
+      hydratedIntervals = true;
+      try {
+        const hasLocal = Boolean(window.localStorage.getItem(INTERVAL_STORAGE_KEY));
+        if (!hasLocal) {
+          const fromServer = {
+            Vtr1: String(data.channels.Vtr1?.intervalSeconds || 10),
+            Vtr2: String(data.channels.Vtr2?.intervalSeconds || 10),
+            Vtr3: String(data.channels.Vtr3?.intervalSeconds || 10),
+          };
+          setIntervalSeconds(fromServer);
+          window.localStorage.setItem(INTERVAL_STORAGE_KEY, JSON.stringify(fromServer));
+        }
+      } catch (err) {}
+    };
 
     const fetchStatus = async () => {
       try {
         const res = await fetch('/api/amp/status');
         const data = await res.json();
         if (data && data.channels) {
+          syncSavedIntervalsFromServer(data);
           setDeckState(data);
         }
       } catch (err) {}
@@ -42,7 +79,10 @@ export default function CompactTripleChannelRecordPage() {
           body: JSON.stringify({ mode: 'hardware', host: DEFAULT_HOST, port: DEFAULT_PORT, channel: 'Vtr1' }),
         });
         const data = await res.json();
-        if (data && data.channels) setDeckState(data);
+        if (data && data.channels) {
+          syncSavedIntervalsFromServer(data);
+          setDeckState(data);
+        }
       } catch (err) {}
     };
 
@@ -471,7 +511,17 @@ export default function CompactTripleChannelRecordPage() {
           disabled={Boolean(ch.intervalRecording)}
           onChange={(event) => {
             const value = event.target.value;
-            setIntervalSeconds((previous) => ({ ...previous, [chId]: value }));
+            setIntervalSeconds((previous) => {
+              const next = { ...previous, [chId]: value };
+              try {
+                window.localStorage.setItem(INTERVAL_STORAGE_KEY, JSON.stringify(next));
+              } catch (err) {}
+              return next;
+            });
+            const num = Number(value);
+            if (Number.isSafeInteger(num) && num >= 1 && num <= 2147483) {
+              sendCommand('set_interval_seconds', chId, { intervalSeconds: num });
+            }
           }}
           style={{
             width: '84px',
