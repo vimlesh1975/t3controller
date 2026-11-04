@@ -54,6 +54,7 @@ export default function CompactTripleChannelRecordPage() {
     Vtr3: '00:00:00:00',
   });
   const [clipSearch, setClipSearch] = useState('');
+  const [clipSort, setClipSort] = useState({ field: 'name', dir: 'asc' });
   const [dragOverChannel, setDragOverChannel] = useState(null);
   const [selectedPlayerChannel, setSelectedPlayerChannel] = useState('Vtr3');
   const [scrubbingFrames, setScrubbingFrames] = useState({});
@@ -1361,9 +1362,95 @@ export default function CompactTripleChannelRecordPage() {
             </div>
           )}
 
+          {/* Sortable Column Headers */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '4px 10px',
+              borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+              fontSize: '10px',
+              fontWeight: 800,
+              letterSpacing: '0.5px',
+              color: '#94a3b8',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() =>
+                setClipSort((prev) => ({
+                  field: 'name',
+                  dir: prev.field === 'name' && prev.dir === 'asc' ? 'desc' : 'asc',
+                }))
+              }
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                color: clipSort.field === 'name' ? '#38bdf8' : '#94a3b8',
+                fontSize: '10px',
+                fontWeight: 800,
+                letterSpacing: '0.5px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+              }}
+              title="Sort by Clip Name"
+            >
+              <span>CLIP NAME</span>
+              <span>{clipSort.field === 'name' ? (clipSort.dir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+            </button>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+              <button
+                type="button"
+                onClick={() =>
+                  setClipSort((prev) => ({
+                    field: 'duration',
+                    dir: prev.field === 'duration' && prev.dir === 'asc' ? 'desc' : 'asc',
+                  }))
+                }
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  color: clipSort.field === 'duration' ? '#38bdf8' : '#94a3b8',
+                  fontSize: '10px',
+                  fontWeight: 800,
+                  letterSpacing: '0.5px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+                title="Sort by Duration"
+              >
+                <span>DURATION</span>
+                <span>{clipSort.field === 'duration' ? (clipSort.dir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+              </button>
+              <span style={{ minWidth: playerChannels.length > 1 ? '118px' : '56px', textAlign: 'right' }}>
+                ACTION
+              </span>
+            </div>
+          </div>
+
           <div style={{ display: 'grid', gap: '5px', maxHeight: '240px', overflowY: 'auto' }}>
-            {(deckState?.clips || [])
+            {[...(deckState?.clips || [])]
               .filter((clip) => clip.name?.toLowerCase().includes(clipSearch.trim().toLowerCase()))
+              .sort((a, b) => {
+                const dir = clipSort.dir === 'desc' ? -1 : 1;
+                if (clipSort.field === 'duration') {
+                  const durA = a.durationFrames ?? (a.duration && a.duration !== 'Unknown' ? parseTcToFrames(a.duration, 25) : -1);
+                  const durB = b.durationFrames ?? (b.duration && b.duration !== 'Unknown' ? parseTcToFrames(b.duration, 25) : -1);
+                  if (durA !== durB) return (durA - durB) * dir;
+                }
+                return String(a.name || '').localeCompare(String(b.name || ''), undefined, {
+                  numeric: true,
+                  sensitivity: 'base',
+                }) * dir;
+              })
               .map((clip, index) => {
                 const loadedOnPlayers = playerChannels.filter(({ ch }) => ch.activeClip?.name === clip.name);
                 const isLoadedOnAnyPlayer = loadedOnPlayers.length > 0;
