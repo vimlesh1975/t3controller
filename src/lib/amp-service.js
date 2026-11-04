@@ -146,8 +146,8 @@ class GrassValleyAmpService {
         inputSource: 'SDI IN 1',
         transportStatus: 'STOPPED',
         timecode: '01:00:00:00',
-        currentFrames: 108000,
-        fps: 29.97,
+        currentFrames: 90000,
+        fps: 25,
         dropFrame: false,
         activeClip: {
           id: 'REC_CAM1',
@@ -155,7 +155,7 @@ class GrassValleyAmpService {
           duration: '00:00:00:00',
           durationFrames: 0,
           format: 'Grass Valley HQX',
-          fps: 29.97,
+          fps: 25,
           resolution: '1920x1080i',
           bin: 'REC_BIN_R1',
         },
@@ -178,8 +178,8 @@ class GrassValleyAmpService {
         inputSource: 'SDI IN 2',
         transportStatus: 'STOPPED',
         timecode: '01:00:00:00',
-        currentFrames: 108000,
-        fps: 29.97,
+        currentFrames: 90000,
+        fps: 25,
         dropFrame: false,
         activeClip: {
           id: 'REC_CAM2',
@@ -187,7 +187,7 @@ class GrassValleyAmpService {
           duration: '00:00:00:00',
           durationFrames: 0,
           format: 'Grass Valley HQX',
-          fps: 29.97,
+          fps: 25,
           resolution: '1920x1080i',
           bin: 'REC_BIN_R2',
         },
@@ -211,7 +211,7 @@ class GrassValleyAmpService {
         transportStatus: 'STOPPED',
         timecode: '00:00:00:00',
         currentFrames: 0,
-        fps: 29.97,
+        fps: 25,
         dropFrame: false,
         activeClip: null,
         inPoint: '00:00:00:00',
@@ -1371,13 +1371,114 @@ class GrassValleyAmpService {
     this.clipListLoading = false;
     this.clipListError = error;
     if (!error) {
+      const folder = this.clipListFolder || 'Default';
+      if (!this.clipDurationCache) this.clipDurationCache = {};
+      for (const clip of sync.clips) {
+        const cached = this.clipDurationCache[`${folder}:${clip.name}`];
+        if (cached) {
+          clip.duration = cached.duration;
+          clip.durationFrames = cached.durationFrames;
+          clip.outPoint = cached.duration;
+        }
+      }
       this.clips = sync.clips;
       this.clipListUpdatedAt = new Date().toISOString();
       this.logPacket('SYS', 'CLIP_LIST_DONE', `Loaded ${this.clips.length} clip(s) from T3`);
+      this.fetchClipListDurations();
     } else {
       this.logPacket('SYS', 'CLIP_LIST_ERROR', error);
     }
     this.notifySubscribers();
+  }
+
+  fetchClipListDurations() {
+    if (this.mode !== 'hardware' || !Array.isArray(this.clips) || this.clips.length === 0) return;
+    if (!this.clipDurationCache) this.clipDurationCache = {};
+    const folder = this.clipListFolder || 'Default';
+    const pending = this.clips.filter((c) => {
+      if (!c?.name) return false;
+      const cached = this.clipDurationCache[`${folder}:${c.name}`];
+      if (cached) {
+        c.duration = cached.duration;
+        c.durationFrames = cached.durationFrames;
+        c.outPoint = cached.duration;
+        return false;
+      }
+      return !c.duration || c.duration === 'Unknown';
+    });
+    if (pending.length === 0) return;
+
+    if (this._durationFetchSocket) {
+      try {
+        this._durationFetchSocket.destroy();
+      } catch (e) {}
+      this._durationFetchSocket = null;
+    }
+
+    const playCh = Object.values(this.channels).find((c) => c.type === 'PLAY');
+    const hwName = playCh?.hwName || this.channelMap?.Vtr3 || 'vtr_p1';
+    const sock = new net.Socket();
+    this._durationFetchSocket = sock;
+    let stage = 'crat';
+    let idx = 0;
+
+    const sendNext = () => {
+      if (this._durationFetchSocket !== sock) return;
+      if (idx >= pending.length) {
+        try {
+          sock.destroy();
+        } catch (e) {}
+        this._durationFetchSocket = null;
+        this.notifySubscribers();
+        return;
+      }
+      const clip = pending[idx];
+      sock.write(buildCmdsPacket(AMP_COMMANDS.getClipDuration(clip.name)));
+    };
+
+    sock.setTimeout(5000);
+    sock.connect(this.port, this.host, () => {
+      sock.write(buildCratPacket(hwName));
+    });
+    sock.on('data', (data) => {
+      const hex = data.toString('utf8').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+      if (stage === 'crat') {
+        stage = 'folder';
+        sock.write(buildCmdsPacket(AMP_COMMANDS.setWorkingFolder(folder)));
+        return;
+      }
+      if (stage === 'folder') {
+        stage = 'query';
+        sendNext();
+        return;
+      }
+      if (stage === 'query') {
+        const clip = pending[idx];
+        if (clip && hex.startsWith('8417') && hex.length >= 12) {
+          const durTc = bcdToTimecode(hex.substr(4, 8));
+          const durFrames = timecodeToFrames(durTc, clip.fps || 25);
+          clip.duration = durTc;
+          clip.durationFrames = durFrames;
+          clip.outPoint = durTc;
+          this.clipDurationCache[`${folder}:${clip.name}`] = { duration: durTc, durationFrames: durFrames };
+        }
+        idx += 1;
+        if (idx % 15 === 0) {
+          this.notifySubscribers();
+        }
+        sendNext();
+      }
+    });
+    sock.on('timeout', () => {
+      try {
+        sock.destroy();
+      } catch (e) {}
+    });
+    sock.on('error', () => {
+      try {
+        sock.destroy();
+      } catch (e) {}
+    });
   }
 
   // High-Fidelity Simulation Clock
@@ -1746,17 +1847,25 @@ class GrassValleyAmpService {
 
       case 'jog': {
         const frames = parseInt(params.frames, 10) || 1;
-        const isFwd = frames > 0;
-        const count = Math.min(15, Math.abs(frames));
-        const cmdHex = isFwd ? AMP_COMMANDS.jogFwd(count) : AMP_COMMANDS.jogRev(count);
+        const fps = ch.fps || 25;
+        const inFrames = timecodeToFrames(ch.inPoint || '00:00:00:00', fps);
+        const durFrames = ch.activeClip?.durationFrames || 0;
+        const maxFrames = durFrames > 0 ? Math.max(inFrames, inFrames + durFrames - 1) : Number.MAX_SAFE_INTEGER;
+        const baseFrames = timecodeToFrames(ch.timecode || '00:00:00:00', fps);
+        const nextFrames = Math.min(maxFrames, Math.max(inFrames, baseFrames + frames));
+        const nextTc = framesToTimecode(nextFrames, fps, ch.dropFrame);
 
+        ch.transportStatus = 'STOPPED';
+        ch.tally.onAir = false;
+        ch.currentFrames = nextFrames;
+        ch.timecode = nextTc;
+        ch._seekLockUntil = Date.now() + 600;
+
+        const cmdHex = AMP_COMMANDS.cueTimecode(nextTc);
         if (this.mode === 'hardware') {
           this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
-          ch.transportStatus = 'STILL';
-          ch.currentFrames = Math.max(0, ch.currentFrames + frames);
-          ch.timecode = framesToTimecode(ch.currentFrames, ch.fps, ch.dropFrame);
-          this.logPacket('TX', `CMDS0006${cmdHex}`, `JOG ${frames > 0 ? '+' : ''}${frames} frames on ${ch.id}`);
+          this.logPacket('TX', `CMDS000c${cmdHex}`, `JOG ${frames > 0 ? '+' : ''}${frames} frames to ${nextTc} on ${ch.id}`);
           this.logPacket('RX', '1001', `ACK: Position ${ch.timecode}`);
         }
         break;
@@ -1990,6 +2099,7 @@ if (!globalThis._gvAmpService) {
 const activeProfile = HARDWARE_PROFILES[globalThis._gvAmpService.hardwareProfileId] || HARDWARE_PROFILES['2R1P'];
 for (const [channelId, role] of Object.entries(activeProfile.channels)) {
   Object.assign(globalThis._gvAmpService.channels[channelId], role);
+  globalThis._gvAmpService.channels[channelId].fps = 25;
   if (!globalThis._gvAmpService.channels[channelId].intervalSeconds) {
     globalThis._gvAmpService.channels[channelId].intervalSeconds = 10;
   }
@@ -2021,6 +2131,7 @@ if (Array.isArray(globalThis._gvAmpService.clips)) {
     seenClipNames.add(c.name);
     return true;
   });
+  globalThis._gvAmpService.fetchClipListDurations();
 }
 
 export const ampService = globalThis._gvAmpService;

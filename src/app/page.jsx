@@ -8,17 +8,17 @@ const DEFAULT_PORT = parseInt(process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
 const INTERVAL_STORAGE_KEY = 't3_interval_seconds';
 const PREFIX_STORAGE_KEY = 't3_clip_prefixes';
 
-function parseTcToFrames(tc, fps = 29.97) {
+function parseTcToFrames(tc, fps = 25) {
   if (!tc || typeof tc !== 'string') return 0;
   const parts = tc.replace(/;/g, ':').split(':').map((p) => parseInt(p, 10) || 0);
   if (parts.length < 4) return 0;
   const [hh, mm, ss, ff] = parts;
-  const roundedFps = Math.round(fps) || 30;
+  const roundedFps = Math.round(fps) || 25;
   return (hh * 3600 + mm * 60 + ss) * roundedFps + ff;
 }
 
-function formatFramesToTc(totalFrames, fps = 29.97) {
-  const roundedFps = Math.round(fps) || 30;
+function formatFramesToTc(totalFrames, fps = 25) {
+  const roundedFps = Math.round(fps) || 25;
   const frames = Math.max(0, Math.floor(totalFrames));
   const ff = frames % roundedFps;
   const totalSeconds = Math.floor(frames / roundedFps);
@@ -1397,7 +1397,22 @@ export default function CompactTripleChannelRecordPage() {
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '12px', fontWeight: 700 }}>
                     {clip.name}
                   </span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                    <span
+                      title="Clip Duration (HH:MM:SS:FF)"
+                      style={{
+                        fontFamily: 'monospace',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        color: clip.duration && clip.duration !== 'Unknown' ? '#94a3b8' : '#475569',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        background: 'rgba(255, 255, 255, 0.04)',
+                        border: '1px solid rgba(255, 255, 255, 0.07)',
+                      }}
+                    >
+                      {clip.duration && clip.duration !== 'Unknown' ? clip.duration : '--:--:--:--'}
+                    </span>
                     {playerChannels.map(({ id, ch }) => {
                       const code = ch.shortCode || id;
                       const isLoadedHere = ch.activeClip?.name === clip.name;

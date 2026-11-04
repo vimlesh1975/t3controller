@@ -129,15 +129,15 @@ export function buildAmpCommand(cmdCode, args = []) {
  * Speed lookup table for Shuttle controls
  */
 export const SHUTTLE_SPEEDS = [
-  { id: '10', rate: 0.1, label: '0.1x', hex: '10' },
-  { id: '20', rate: 0.25, label: '0.25x', hex: '20' },
-  { id: '30', rate: 0.5, label: '0.5x', hex: '30' },
-  { id: '48', rate: 1.0, label: '1.0x', hex: '48' },
-  { id: '74', rate: 2.0, label: '2.0x', hex: '74' },
-  { id: '83', rate: 4.0, label: '4.0x', hex: '83' },
-  { id: '93', rate: 8.0, label: '8.0x', hex: '93' },
-  { id: '103', rate: 16.0, label: '16.0x', hex: '103' },
-  { id: '112', rate: 32.0, label: '32.0x', hex: '112' },
+  { id: '32', rate: 0.1, label: '0.1x', hex: '20' },
+  { id: '45', rate: 0.25, label: '0.25x', hex: '2d' },
+  { id: '54', rate: 0.5, label: '0.5x', hex: '36' },
+  { id: '64', rate: 1.0, label: '1.0x', hex: '40' },
+  { id: '74', rate: 2.0, label: '2.0x', hex: '4a' },
+  { id: '83', rate: 4.0, label: '4.0x', hex: '53' },
+  { id: '93', rate: 8.0, label: '8.0x', hex: '5d' },
+  { id: '103', rate: 16.0, label: '16.0x', hex: '67' },
+  { id: '112', rate: 32.0, label: '32.0x', hex: '70' },
 ];
 
 /**
@@ -165,8 +165,8 @@ export const AMP_COMMANDS = {
     const totalBytes = zpad((folderName.length + 2).toString(16), 4);
     return `a20e${totalBytes}${len}${hex}`;
   },
-  shuttleFwd: (speedHex = '74') => `2113${speedHex}`,
-  shuttleRev: (speedHex = '74') => `2123${speedHex}`,
+  shuttleFwd: (speedHex = '4a') => `2113${speedHex}`,
+  shuttleRev: (speedHex = '4a') => `2123${speedHex}`,
   jogFwd: (frames = 1) => `2111${zpad(frames.toString(16), 2)}`,
   jogRev: (frames = 1) => `2121${zpad(frames.toString(16), 2)}`,
   loadClip: (clipName) => {
