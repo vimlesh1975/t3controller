@@ -15,10 +15,18 @@ export default function CompactTripleChannelRecordPage() {
     Vtr2: '10',
     Vtr3: '10',
   });
-  const [playerClipName, setPlayerClipName] = useState('');
-  const [playerCueTimecode, setPlayerCueTimecode] = useState('00:00:00:00');
+  const [playerClipNames, setPlayerClipNames] = useState({
+    Vtr1: '',
+    Vtr2: '',
+    Vtr3: '',
+  });
+  const [playerCueTimecodes, setPlayerCueTimecodes] = useState({
+    Vtr1: '00:00:00:00',
+    Vtr2: '00:00:00:00',
+    Vtr3: '00:00:00:00',
+  });
   const [clipSearch, setClipSearch] = useState('');
-  const [dragOverPlayer, setDragOverPlayer] = useState(false);
+  const [dragOverChannel, setDragOverChannel] = useState(null);
 
   // Restore saved interval recording durations from localStorage on mount
   useEffect(() => {
@@ -207,23 +215,27 @@ export default function CompactTripleChannelRecordPage() {
     sendCommand('play', channel);
   }, [sendCommand]);
 
-  const loadPlayerClip = useCallback(() => {
-    const clipName = playerClipName.trim();
-    if (clipName) sendCommand('load_clip', 'Vtr3', { clipName });
-  }, [playerClipName, sendCommand]);
+  const loadPlayerClip = useCallback((channel = 'Vtr3') => {
+    const clipName = (playerClipNames[channel] || '').trim();
+    if (clipName) sendCommand('load_clip', channel, { clipName });
+  }, [playerClipNames, sendCommand]);
 
-  const loadClipToPlayer = useCallback((clip) => {
-    setPlayerClipName(clip.name);
-    sendCommand('load_clip', 'Vtr3', { clipName: clip.name });
-  }, [sendCommand]);
+  const loadClipToPlayer = useCallback((clip, targetChannel) => {
+    const fallbackPlayer = ['Vtr1', 'Vtr2', 'Vtr3'].find(
+      (id) => deckState?.channels?.[id]?.type === 'PLAY'
+    ) || 'Vtr3';
+    const chId = targetChannel || fallbackPlayer;
+    setPlayerClipNames((prev) => ({ ...prev, [chId]: clip.name }));
+    sendCommand('load_clip', chId, { clipName: clip.name });
+  }, [deckState, sendCommand]);
 
   const syncClipList = useCallback(() => {
     sendCommand('sync_clips', 'Vtr1');
   }, [sendCommand]);
 
-  const cuePlayer = useCallback(() => {
-    sendCommand('cue_timecode', 'Vtr3', { timecode: playerCueTimecode });
-  }, [playerCueTimecode, sendCommand]);
+  const cuePlayer = useCallback((channel = 'Vtr3') => {
+    sendCommand('cue_timecode', channel, { timecode: playerCueTimecodes[channel] || '00:00:00:00' });
+  }, [playerCueTimecodes, sendCommand]);
 
   const stopRecord = useCallback((channel) => {
     sendCommand('stop', channel);
@@ -249,26 +261,33 @@ export default function CompactTripleChannelRecordPage() {
     sendCommand('play_all');
   }, [sendCommand]);
 
-  // Keyboard shortcuts (1: R1, 2: R2, 3: P1, R: Rec All, P: Play All, S/Esc: Stop All)
+  // Keyboard shortcuts (1: CH1, 2: CH2, 3: CH3, R: Rec All, P: Play All, S/Esc: Stop All)
   useEffect(() => {
+    const toggleChannelTransport = (chId) => {
+      const ch = deckState?.channels?.[chId];
+      const isRec = (ch?.type || 'RECORD') === 'RECORD';
+      if (isRec) {
+        const active = ch?.transportStatus === 'RECORDING' || ch?.tally?.recording;
+        if (active) stopRecord(chId);
+        else startRecord(chId);
+      } else {
+        const active = ch?.transportStatus === 'PLAYING' || ch?.tally?.onAir;
+        if (active) stopRecord(chId);
+        else startPlayback(chId);
+      }
+    };
     const handleKeyDown = (e) => {
       if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
       const key = e.key.toLowerCase();
       if (key === '1') {
         e.preventDefault();
-        const ch1Rec = deckState?.channels?.['Vtr1']?.transportStatus === 'RECORDING' || deckState?.channels?.['Vtr1']?.tally?.recording;
-        if (ch1Rec) stopRecord('Vtr1');
-        else startRecord('Vtr1');
+        toggleChannelTransport('Vtr1');
       } else if (key === '2') {
         e.preventDefault();
-        const ch2Rec = deckState?.channels?.['Vtr2']?.transportStatus === 'RECORDING' || deckState?.channels?.['Vtr2']?.tally?.recording;
-        if (ch2Rec) stopRecord('Vtr2');
-        else startRecord('Vtr2');
+        toggleChannelTransport('Vtr2');
       } else if (key === '3') {
         e.preventDefault();
-        const ch3Playing = deckState?.channels?.['Vtr3']?.transportStatus === 'PLAYING';
-        if (ch3Playing) stopRecord('Vtr3');
-        else startPlayback('Vtr3');
+        toggleChannelTransport('Vtr3');
       } else if (key === 'r') {
         e.preventDefault();
         recordAll();
@@ -284,46 +303,63 @@ export default function CompactTripleChannelRecordPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [deckState, startRecord, startPlayback, stopRecord, recordAll, playAll, stopAll]);
 
-  const ch1 = deckState?.channels?.['Vtr1'] || { type: 'RECORD' };
-  const ch2 = deckState?.channels?.['Vtr2'] || { type: 'RECORD' };
-  const ch3 = deckState?.channels?.['Vtr3'] || { type: 'PLAY' };
+  const ch1 = deckState?.channels?.['Vtr1'] || { type: 'RECORD', deckLabel: 'RECORDER 1', shortCode: 'R1' };
+  const ch2 = deckState?.channels?.['Vtr2'] || { type: 'RECORD', deckLabel: 'RECORDER 2', shortCode: 'R2' };
+  const ch3 = deckState?.channels?.['Vtr3'] || { type: 'PLAY', deckLabel: 'PLAYER 1', shortCode: 'P1' };
 
-  const ch1Recording = ch1.transportStatus === 'RECORDING' || ch1.tally?.recording === true;
-  const ch2Recording = ch2.transportStatus === 'RECORDING' || ch2.tally?.recording === true;
-  const ch3Playing = ch3.transportStatus === 'PLAYING' || ch3.tally?.onAir === true;
+  const isChActive = (ch) =>
+    ch.type === 'PLAY'
+      ? ch.transportStatus === 'PLAYING' || ch.tally?.onAir === true
+      : ch.transportStatus === 'RECORDING' || ch.tally?.recording === true;
+
+  const ch1Active = isChActive(ch1);
+  const ch2Active = isChActive(ch2);
+  const ch3Active = isChActive(ch3);
+
+  const allChannels = [
+    { id: 'Vtr1', ch: ch1 },
+    { id: 'Vtr2', ch: ch2 },
+    { id: 'Vtr3', ch: ch3 },
+  ];
+  const recorderCodes = allChannels.filter(({ ch }) => ch.type !== 'PLAY').map(({ ch }) => ch.shortCode || 'R');
+  const playerCodes = allChannels.filter(({ ch }) => ch.type === 'PLAY').map(({ ch }) => ch.shortCode || 'P');
+  const allCodes = allChannels.map(({ ch }) => ch.shortCode || ch.id);
 
   const host = deckState?.host || DEFAULT_HOST;
   const port = deckState?.port || DEFAULT_PORT;
   const isConnected = deckState?.isConnected;
+  const hwConfigLabel = deckState?.hardwareConfig?.label || '2-RECORDER / 1-PLAYER CONSOLE';
 
   const renderChannelDeck = (chId, label, ch, isActive, hotkeyNum) => {
     const isRecorder = ch.type === 'RECORD' || ch.type === 'RECORD_PLAY';
     const activeColor = isRecorder ? '#ef4444' : '#22c55e';
+    const isDragOver = dragOverChannel === chId;
+    const shortCode = ch.shortCode || (isRecorder ? 'R' : 'P1');
 
     return (
     <div
       key={chId}
       id={`deck-${chId.toLowerCase()}`}
       role={!isRecorder ? 'group' : undefined}
-      aria-label={!isRecorder ? 'P1 player drop target' : undefined}
+      aria-label={!isRecorder ? `${shortCode} player drop target` : undefined}
       onDragOver={!isRecorder ? (event) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
-        setDragOverPlayer(true);
+        setDragOverChannel(chId);
       } : undefined}
       onDrop={!isRecorder ? (event) => {
         event.preventDefault();
-        setDragOverPlayer(false);
+        setDragOverChannel(null);
         const clipName = event.dataTransfer.getData('text/plain').trim();
-        if (clipName) loadClipToPlayer({ name: clipName });
+        if (clipName) loadClipToPlayer({ name: clipName }, chId);
       } : undefined}
       onDragLeave={!isRecorder ? (event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setDragOverPlayer(false);
+        if (!event.currentTarget.contains(event.relatedTarget)) setDragOverChannel(null);
       } : undefined}
       style={{
       background: '#0d1019',
       borderRadius: '10px',
-      border: `1.5px solid ${!isRecorder && dragOverPlayer ? '#22c55e' : isActive ? activeColor : 'rgba(255, 255, 255, 0.08)'}`,
+      border: `1.5px solid ${!isRecorder && isDragOver ? '#22c55e' : isActive ? activeColor : 'rgba(255, 255, 255, 0.08)'}`,
       padding: '12px 14px',
       display: 'flex',
       flexDirection: 'column',
@@ -583,7 +619,7 @@ export default function CompactTripleChannelRecordPage() {
           }}
         >
           <div style={{ fontSize: '11px', color: '#94a3b8' }}>
-            {dragOverPlayer ? 'Drop to load on P1' : 'Loaded media:'}{' '}
+            {isDragOver ? `Drop to load on ${shortCode}` : 'Loaded media:'}{' '}
             <strong style={{ color: ch.activeClip?.name ? '#e2e8f0' : '#fbbf24' }}>
               {ch.activeClip?.name || 'No clip loaded'}
             </strong>
@@ -591,7 +627,7 @@ export default function CompactTripleChannelRecordPage() {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              loadPlayerClip();
+              loadPlayerClip(chId);
             }}
             style={{ display: 'flex', gap: '6px' }}
           >
@@ -599,8 +635,11 @@ export default function CompactTripleChannelRecordPage() {
               aria-label="T3 clip name"
               type="text"
               maxLength={128}
-              value={playerClipName}
-              onChange={(event) => setPlayerClipName(event.target.value)}
+              value={playerClipNames[chId] || ''}
+              onChange={(event) => {
+                const val = event.target.value;
+                setPlayerClipNames((prev) => ({ ...prev, [chId]: val }));
+              }}
               placeholder="Enter T3 clip name"
               style={{
                 minWidth: 0,
@@ -615,7 +654,7 @@ export default function CompactTripleChannelRecordPage() {
             />
             <button
               type="submit"
-              disabled={!playerClipName.trim()}
+              disabled={!(playerClipNames[chId] || '').trim()}
               style={{
                 border: '1px solid #22c55e',
                 borderRadius: '6px',
@@ -623,8 +662,8 @@ export default function CompactTripleChannelRecordPage() {
                 background: '#14532d',
                 color: '#fff',
                 fontWeight: 700,
-                cursor: playerClipName.trim() ? 'pointer' : 'not-allowed',
-                opacity: playerClipName.trim() ? 1 : 0.55,
+                cursor: (playerClipNames[chId] || '').trim() ? 'pointer' : 'not-allowed',
+                opacity: (playerClipNames[chId] || '').trim() ? 1 : 0.55,
               }}
             >
               LOAD
@@ -634,21 +673,24 @@ export default function CompactTripleChannelRecordPage() {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              cuePlayer();
+              cuePlayer(chId);
             }}
             style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
           >
-            <label htmlFor="player-cue-timecode" style={{ fontSize: '11px', color: '#cbd5e1' }}>
+            <label htmlFor={`player-cue-timecode-${chId}`} style={{ fontSize: '11px', color: '#cbd5e1' }}>
               Cue
             </label>
             <input
-              id="player-cue-timecode"
+              id={`player-cue-timecode-${chId}`}
               type="text"
               inputMode="numeric"
               pattern="[0-9]{2}:[0-9]{2}:[0-9]{2}:[0-9]{2}"
               maxLength={11}
-              value={playerCueTimecode}
-              onChange={(event) => setPlayerCueTimecode(event.target.value)}
+              value={playerCueTimecodes[chId] || '00:00:00:00'}
+              onChange={(event) => {
+                const val = event.target.value;
+                setPlayerCueTimecodes((prev) => ({ ...prev, [chId]: val }));
+              }}
               aria-label="Cue timecode in HH:MM:SS:FF format"
               style={{
                 width: '120px',
@@ -744,7 +786,7 @@ export default function CompactTripleChannelRecordPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <Disc size={15} color="#ef4444" />
             <span style={{ fontWeight: 800, color: '#fff', letterSpacing: '0.5px' }}>
-              GRASS VALLEY T3 • 2-RECORDER / 1-PLAYER CONSOLE
+              GRASS VALLEY T3 • {hwConfigLabel}
             </span>
           </div>
 
@@ -810,34 +852,36 @@ export default function CompactTripleChannelRecordPage() {
             }}
           >
             <Circle size={12} fill="#ffffff" />
-            <span>RECORD ALL (R1 + R2) [R]</span>
+            <span>RECORD ALL ({recorderCodes.join(' + ') || 'NONE'}) [R]</span>
           </button>
 
-          <button
-            type="button"
-            id="btn-play-all"
-            onClick={playAll}
-            style={{
-              background: 'linear-gradient(180deg, #16a34a 0%, #166534 100%)',
-              border: '1px solid #22c55e',
-              borderRadius: '6px',
-              padding: '8px 14px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '6px',
-              color: '#ffffff',
-              fontSize: '12px',
-              fontWeight: 800,
-              letterSpacing: '0.6px',
-              cursor: 'pointer',
-              userSelect: 'none',
-              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
-            }}
-          >
-            <Disc size={12} />
-            <span>PLAY ALL (P1) [P]</span>
-          </button>
+          {playerCodes.length > 0 && (
+            <button
+              type="button"
+              id="btn-play-all"
+              onClick={playAll}
+              style={{
+                background: 'linear-gradient(180deg, #16a34a 0%, #166534 100%)',
+                border: '1px solid #22c55e',
+                borderRadius: '6px',
+                padding: '8px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                color: '#ffffff',
+                fontSize: '12px',
+                fontWeight: 800,
+                letterSpacing: '0.6px',
+                cursor: 'pointer',
+                userSelect: 'none',
+                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+              }}
+            >
+              <Disc size={12} />
+              <span>PLAY ALL ({playerCodes.join(' + ')}) [P]</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -862,20 +906,20 @@ export default function CompactTripleChannelRecordPage() {
             }}
           >
             <Square size={12} fill="#cbd5e1" />
-            <span>STOP ALL (R1 + R2 + P1) [S]</span>
+            <span>STOP ALL ({allCodes.join(' + ')}) [S]</span>
           </button>
         </div>
 
-        {/* Two recorder channels and one player channel */}
+        {/* Dynamic three-channel decks */}
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
           gap: '12px',
           width: '100%',
         }}>
-          {renderChannelDeck('Vtr1', 'RECORDER 1', ch1, ch1Recording, '1')}
-          {renderChannelDeck('Vtr2', 'RECORDER 2', ch2, ch2Recording, '2')}
-          {renderChannelDeck('Vtr3', 'PLAYER 1', ch3, ch3Playing, '3')}
+          {renderChannelDeck('Vtr1', ch1.deckLabel || 'RECORDER 1', ch1, ch1Active, '1')}
+          {renderChannelDeck('Vtr2', ch2.deckLabel || 'RECORDER 2', ch2, ch2Active, '2')}
+          {renderChannelDeck('Vtr3', ch3.deckLabel || 'PLAYER 1', ch3, ch3Active, '3')}
         </div>
 
         <section
@@ -966,7 +1010,7 @@ export default function CompactTripleChannelRecordPage() {
                     event.dataTransfer.setData('text/plain', clip.name);
                     event.dataTransfer.effectAllowed = 'copy';
                   }}
-                  onDragEnd={() => setDragOverPlayer(false)}
+                  onDragEnd={() => setDragOverChannel(null)}
                   onClick={() => loadClipToPlayer(clip)}
                   title={`Drag to P1 or click to load ${clip.name}`}
                   style={{

@@ -87,17 +87,46 @@ const DEFAULT_CLIPS = [
   },
 ];
 
+const HARDWARE_PROFILES = {
+  '3R': {
+    id: '3R',
+    label: '3-RECORDER CONSOLE',
+    shortLabel: '3R',
+    channels: {
+      Vtr1: { hwName: 'vtr_r1', label: 'R1 (Recorder 1)', deckLabel: 'RECORDER 1', shortCode: 'R1', type: 'RECORD' },
+      Vtr2: { hwName: 'vtr_r2', label: 'R2 (Recorder 2)', deckLabel: 'RECORDER 2', shortCode: 'R2', type: 'RECORD' },
+      Vtr3: { hwName: 'vtr_r3', label: 'R3 (Recorder 3)', deckLabel: 'RECORDER 3', shortCode: 'R3', type: 'RECORD' },
+    },
+  },
+  '2R1P': {
+    id: '2R1P',
+    label: '2-RECORDER / 1-PLAYER CONSOLE',
+    shortLabel: '2R / 1P',
+    channels: {
+      Vtr1: { hwName: 'vtr_r1', label: 'R1 (Recorder 1)', deckLabel: 'RECORDER 1', shortCode: 'R1', type: 'RECORD' },
+      Vtr2: { hwName: 'vtr_r2', label: 'R2 (Recorder 2)', deckLabel: 'RECORDER 2', shortCode: 'R2', type: 'RECORD' },
+      Vtr3: { hwName: 'vtr_p1', label: 'P1 (Player 1)', deckLabel: 'PLAYER 1', shortCode: 'P1', type: 'PLAY' },
+    },
+  },
+  '1R2P': {
+    id: '1R2P',
+    label: '1-RECORDER / 2-PLAYER CONSOLE',
+    shortLabel: '1R / 2P',
+    channels: {
+      Vtr1: { hwName: 'vtr_r1', label: 'R1 (Recorder 1)', deckLabel: 'RECORDER 1', shortCode: 'R1', type: 'RECORD' },
+      Vtr2: { hwName: 'vtr_p1', label: 'P1 (Player 1)', deckLabel: 'PLAYER 1', shortCode: 'P1', type: 'PLAY' },
+      Vtr3: { hwName: 'vtr_p2', label: 'P2 (Player 2)', deckLabel: 'PLAYER 2', shortCode: 'P2', type: 'PLAY' },
+    },
+  },
+};
+
 const CHANNEL_MAP = {
   Vtr1: 'vtr_r1',
   Vtr2: 'vtr_r2',
   Vtr3: 'vtr_p1',
 };
 
-const CHANNEL_ROLES = {
-  Vtr1: { label: 'R1 (Recorder 1)', type: 'RECORD' },
-  Vtr2: { label: 'R2 (Recorder 2)', type: 'RECORD' },
-  Vtr3: { label: 'P1 (Player 1)', type: 'PLAY' },
-};
+const CHANNEL_ROLES = HARDWARE_PROFILES['2R1P'].channels;
 
 class GrassValleyAmpService {
   constructor() {
@@ -212,6 +241,10 @@ class GrassValleyAmpService {
     this.heartbeatTimer = null;
     this.simulationTimer = null;
     this.intervalRecordings = {};
+    this.hardwareProfileId = '2R1P';
+    this.detectedHwChannels = [];
+    this.channelMap = { ...CHANNEL_MAP };
+    this._detectingConfig = null;
     this.loadIntervalSettings();
 
     // Start background simulation clock
@@ -296,6 +329,7 @@ class GrassValleyAmpService {
   }
 
   getStateSnapshot() {
+    const profile = HARDWARE_PROFILES[this.hardwareProfileId] || HARDWARE_PROFILES['2R1P'];
     return {
       mode: this.mode,
       host: this.host,
@@ -304,6 +338,12 @@ class GrassValleyAmpService {
       isConnected: this.isConnected,
       connectionState: this.connectionState,
       lastError: this.lastError,
+      hardwareConfig: {
+        id: profile.id,
+        label: profile.label,
+        shortLabel: profile.shortLabel,
+        detectedChannels: this.detectedHwChannels || [],
+      },
       channels: this.channels,
       currentChannelState: this.channels[this.activeChannel] || {},
       clips: this.clips,
@@ -362,20 +402,128 @@ class GrassValleyAmpService {
     return this.connectHardwareSocket(endpointChanged);
   }
 
+  probeHardwareChannel(hwName, timeoutMs = 600) {
+    return new Promise((resolve) => {
+      const sock = new net.Socket();
+      let settled = false;
+      const finish = (ack) => {
+        if (settled) return;
+        settled = true;
+        try {
+          sock.destroy();
+        } catch (e) {}
+        resolve(ack);
+      };
+      sock.setTimeout(timeoutMs);
+      sock.connect(this.port, this.host, () => {
+        sock.write(buildCratPacket(hwName));
+      });
+      sock.on('data', (data) => {
+        const hex = data.toString('utf8').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+        finish(hex.startsWith('1001'));
+      });
+      sock.on('timeout', () => finish(false));
+      sock.on('error', () => finish(false));
+      sock.on('close', () => finish(false));
+    });
+  }
+
+  applyHardwareProfile(profileId, activeHwChannels = []) {
+    const profile = HARDWARE_PROFILES[profileId] || HARDWARE_PROFILES['2R1P'];
+    const profileChanged = this.hardwareProfileId !== profile.id;
+    this.hardwareProfileId = profile.id;
+    this.detectedHwChannels = activeHwChannels;
+    if (!this.channelMap) this.channelMap = { ...CHANNEL_MAP };
+
+    for (const [chId, role] of Object.entries(profile.channels)) {
+      const prevType = this.channels[chId]?.type;
+      this.channelMap[chId] = role.hwName;
+      Object.assign(this.channels[chId], role);
+      if (prevType && prevType !== role.type) {
+        if (this.intervalRecordings?.[chId]) {
+          this.stopIntervalRecording(chId);
+        }
+        this.channels[chId].transportStatus = 'STOPPED';
+        this.channels[chId].tally = { onAir: false, recording: false, cued: true };
+        if (role.type === 'PLAY') {
+          this.channels[chId].activeClip = null;
+          this.channels[chId].timecode = '00:00:00:00';
+          this.channels[chId].currentFrames = 0;
+        }
+      }
+      if (this.mode === 'hardware') {
+        const sock = this.sockets?.[chId];
+        if (!sock || sock.destroyed || sock.boundHwName !== role.hwName) {
+          if (this.channelReconnectTimers?.[chId]) {
+            clearTimeout(this.channelReconnectTimers[chId]);
+            delete this.channelReconnectTimers[chId];
+          }
+          this.connectChannelSocket(chId, true);
+        }
+      }
+    }
+
+    if (profileChanged) {
+      this.logPacket(
+        'SYS',
+        'HW_CONFIG_DETECTED',
+        `Sensed T3 configuration: ${profile.label} (${Object.values(profile.channels).map((c) => c.hwName).join(', ')})`
+      );
+    }
+    this.notifySubscribers();
+    return profile;
+  }
+
+  async detectHardwareConfiguration() {
+    if (this.mode !== 'hardware') {
+      return HARDWARE_PROFILES[this.hardwareProfileId] || HARDWARE_PROFILES['2R1P'];
+    }
+    if (this._detectingConfig) return this._detectingConfig;
+
+    this._detectingConfig = (async () => {
+      try {
+        const candidates = ['vtr_r1', 'vtr_r2', 'vtr_r3', 'vtr_p1', 'vtr_p2'];
+        const results = await Promise.all(
+          candidates.map(async (hwName) => ({
+            hwName,
+            ack: await this.probeHardwareChannel(hwName),
+          }))
+        );
+        const active = results.filter((r) => r.ack).map((r) => r.hwName);
+        let nextProfileId = this.hardwareProfileId || '2R1P';
+        if (active.includes('vtr_r3')) {
+          nextProfileId = '3R';
+        } else if (active.includes('vtr_p2')) {
+          nextProfileId = '1R2P';
+        } else if (active.includes('vtr_p1')) {
+          nextProfileId = '2R1P';
+        }
+        return this.applyHardwareProfile(nextProfileId, active);
+      } finally {
+        this._detectingConfig = null;
+      }
+    })();
+
+    return this._detectingConfig;
+  }
+
   // Connect TCP sockets for all active channels (Vtr1, Vtr2, Vtr3) to real Grass Valley T3
   async connectHardwareSocket(forceReconnect = false) {
     if (!this.sockets) this.sockets = {};
     if (!this.channelHeartbeats) this.channelHeartbeats = {};
+    if (!this.channelMap) this.channelMap = { ...CHANNEL_MAP };
     this.connectChannelSocket('Vtr1', forceReconnect);
     this.connectChannelSocket('Vtr2', forceReconnect);
     this.connectChannelSocket('Vtr3', forceReconnect);
+    this.detectHardwareConfiguration();
     return { success: true, mode: 'hardware' };
   }
 
   connectChannelSocket(channelId, forceReconnect = false) {
     if (!this.sockets) this.sockets = {};
     if (!this.channelHeartbeats) this.channelHeartbeats = {};
-    const hwName = CHANNEL_MAP[channelId] || channelId;
+    if (!this.channelMap) this.channelMap = { ...CHANNEL_MAP };
+    const hwName = this.channelMap[channelId] || CHANNEL_MAP[channelId] || channelId;
     if (this.sockets[channelId]) {
       const old = this.sockets[channelId];
       if (!forceReconnect && !old.destroyed) return;
@@ -467,9 +615,10 @@ class GrassValleyAmpService {
       `REBIND_RETRY_${channelId}`,
       `${reason} on ${channelId}; retrying connection in ${delay} ms (attempt ${attempt})`
     );
-    this.channelReconnectTimers[channelId] = setTimeout(() => {
+    this.channelReconnectTimers[channelId] = setTimeout(async () => {
       delete this.channelReconnectTimers[channelId];
       if (this.mode !== 'hardware') return;
+      await this.detectHardwareConfiguration();
       this.logPacket('SYS', `REBIND_CONNECT_${channelId}`, `Retrying T3 channel bind on ${channelId}`);
       this.connectChannelSocket(channelId, true);
     }, delay);
@@ -1440,6 +1589,11 @@ class GrassValleyAmpService {
         return this.refreshClipDirectory(targetChannel);
       }
 
+      case 'detect_config': {
+        this.detectHardwareConfiguration();
+        return { success: true, channelState: ch };
+      }
+
       case 'set_loop': {
         const enabled = Boolean(params.enabled);
         ch.loop = enabled;
@@ -1546,8 +1700,11 @@ if (!globalThis._gvAmpService) {
   if (globalThis._gvAmpService.clipListError === undefined) globalThis._gvAmpService.clipListError = null;
   if (globalThis._gvAmpService.clipListUpdatedAt === undefined) globalThis._gvAmpService.clipListUpdatedAt = null;
   if (globalThis._gvAmpService.clipDirectorySync === undefined) globalThis._gvAmpService.clipDirectorySync = null;
+  if (!globalThis._gvAmpService.hardwareProfileId) globalThis._gvAmpService.hardwareProfileId = '2R1P';
+  if (!globalThis._gvAmpService.detectedHwChannels) globalThis._gvAmpService.detectedHwChannels = [];
+  if (!globalThis._gvAmpService.channelMap) globalThis._gvAmpService.channelMap = { ...CHANNEL_MAP };
   if (globalThis._gvAmpService.mode === 'hardware') {
-    for (const [chId, hwName] of Object.entries(CHANNEL_MAP)) {
+    for (const [chId, hwName] of Object.entries(globalThis._gvAmpService.channelMap)) {
       const sock = globalThis._gvAmpService.sockets?.[chId];
       if (!sock || sock.destroyed || sock.boundHwName !== hwName) {
         if (globalThis._gvAmpService.channelReconnectTimers?.[chId]) {
@@ -1557,10 +1714,12 @@ if (!globalThis._gvAmpService) {
         globalThis._gvAmpService.connectChannelSocket(chId, true);
       }
     }
+    globalThis._gvAmpService.detectHardwareConfiguration();
   }
 }
 
-for (const [channelId, role] of Object.entries(CHANNEL_ROLES)) {
+const activeProfile = HARDWARE_PROFILES[globalThis._gvAmpService.hardwareProfileId] || HARDWARE_PROFILES['2R1P'];
+for (const [channelId, role] of Object.entries(activeProfile.channels)) {
   Object.assign(globalThis._gvAmpService.channels[channelId], role);
   if (!globalThis._gvAmpService.channels[channelId].intervalSeconds) {
     globalThis._gvAmpService.channels[channelId].intervalSeconds = 10;
