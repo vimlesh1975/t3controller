@@ -1042,11 +1042,55 @@ export default function CompactTripleChannelRecordPage() {
           border: '1px solid rgba(255, 255, 255, 0.08)',
           fontSize: '11px',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <Disc size={15} color="#ef4444" />
             <span style={{ fontWeight: 800, color: '#fff', letterSpacing: '0.5px' }}>
               GRASS VALLEY T3 • {hwConfigLabel}
             </span>
+            <select
+              aria-label="T3 channel configuration profile"
+              value={deckState?.hardwareConfig?.id || '2R1P'}
+              onChange={(event) => {
+                sendCommand('set_hardware_profile', 'Vtr1', { profileId: event.target.value });
+              }}
+              style={{
+                padding: '2px 6px',
+                borderRadius: '4px',
+                border: '1px solid rgba(255, 255, 255, 0.16)',
+                background: '#04060a',
+                color: '#e2e8f0',
+                fontSize: '10px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+              title="Switch or override T3 channel layout"
+            >
+              <option value="3R">3R (3 Recorders)</option>
+              <option value="2R1P">2R / 1P (2 Rec, 1 Play)</option>
+              <option value="1R2P">1R / 2P (1 Rec, 2 Play)</option>
+              <option value="3P">3P (3 Players)</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => sendCommand('detect_config', 'Vtr1')}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '2px 6px',
+                borderRadius: '4px',
+                border: '1px solid rgba(255, 255, 255, 0.14)',
+                background: '#1e293b',
+                color: '#cbd5e1',
+                fontSize: '10px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+              title="Re-sense active T3 channels via AMP CRAT"
+            >
+              <RefreshCw size={10} />
+              <span>SENSE</span>
+            </button>
           </div>
 
           <div style={{
@@ -1112,31 +1156,33 @@ export default function CompactTripleChannelRecordPage() {
           gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
           gap: '8px',
         }}>
-          <button
-            type="button"
-            id="btn-rec-all"
-            onClick={recordAll}
-            style={{
-              background: 'linear-gradient(180deg, #b91c1c 0%, #7f1d1d 100%)',
-              border: '1px solid #ef4444',
-              borderRadius: '6px',
-              padding: '8px 14px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '6px',
-              color: '#ffffff',
-              fontSize: '12px',
-              fontWeight: 800,
-              letterSpacing: '0.6px',
-              cursor: 'pointer',
-              userSelect: 'none',
-              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
-            }}
-          >
-            <Circle size={12} fill="#ffffff" />
-            <span>RECORD ALL ({recorderCodes.join(' + ') || 'NONE'}) [R]</span>
-          </button>
+          {recorderCodes.length > 0 && (
+            <button
+              type="button"
+              id="btn-rec-all"
+              onClick={recordAll}
+              style={{
+                background: 'linear-gradient(180deg, #b91c1c 0%, #7f1d1d 100%)',
+                border: '1px solid #ef4444',
+                borderRadius: '6px',
+                padding: '8px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                color: '#ffffff',
+                fontSize: '12px',
+                fontWeight: 800,
+                letterSpacing: '0.6px',
+                cursor: 'pointer',
+                userSelect: 'none',
+                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+              }}
+            >
+              <Circle size={12} fill="#ffffff" />
+              <span>RECORD ALL ({recorderCodes.join(' + ')}) [R]</span>
+            </button>
+          )}
 
           {playerCodes.length > 0 && (
             <button
