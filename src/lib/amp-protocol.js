@@ -150,11 +150,21 @@ export const AMP_COMMANDS = {
   EJECT: '200f',
   LOOP_ON: '414201',
   LOOP_OFF: '414200',
-  STATUS_SENSE: '612002',
+  STATUS_SENSE: '612005',
   TIMECODE_SENSE: '610c04',
   ID_LOADED: 'a016', // ID Loaded Request -> reply 82.16 <byteCount:2> <strLen:2> <ascii name>
+  GET_WORKING_FOLDER: 'a00f', // Get Working Folder -> reply 82.0f <byteCount:2> <strLen:2> <ascii folder>
+  LIST_FOLDERS: 'a027', // List Available Folders -> reply 82.27 <byteCount:2> [ <strLen:2> <ascii folder> ... ]
+  REMAINING_TIME: 'a01c', // Remaining Record Time -> reply 84.1c <FF SS MM HH>
+  SYSTEM_NAME: 'a02c', // System Name -> reply 82.2c <byteCount:2> <strLen:1> <ascii name>
   LIST_FIRST_ID: 'a2140000',
   LIST_NEXT_ID: 'a115ff',
+  setWorkingFolder: (folderName) => {
+    const hex = str2hex(folderName);
+    const len = zpad(folderName.length.toString(16), 4);
+    const totalBytes = zpad((folderName.length + 2).toString(16), 4);
+    return `a20e${totalBytes}${len}${hex}`;
+  },
   shuttleFwd: (speedHex = '74') => `2113${speedHex}`,
   shuttleRev: (speedHex = '74') => `2123${speedHex}`,
   jogFwd: (frames = 1) => `2111${zpad(frames.toString(16), 2)}`,
@@ -165,6 +175,18 @@ export const AMP_COMMANDS = {
     const totalBytes = zpad((clipName.length + 2).toString(16), 4);
     return `4a14${totalBytes}${len}${hex}`;
   },
+  getClipDuration: (clipName) => {
+    const hex = str2hex(clipName);
+    const len = zpad(clipName.length.toString(16), 4);
+    const totalBytes = zpad((clipName.length + 2).toString(16), 4);
+    return `a217${totalBytes}${len}${hex}`;
+  },
+  getClipStartTc: (clipName) => {
+    const hex = str2hex(clipName);
+    const len = zpad(clipName.length.toString(16), 4);
+    const totalBytes = zpad((clipName.length + 2).toString(16), 4);
+    return `a225${totalBytes}${len}${hex}`;
+  },
   recordClip: (clipName, initialTc = '00000000') => {
     const hex = str2hex(clipName);
     const len = zpad(clipName.length.toString(16), 4);
@@ -173,7 +195,7 @@ export const AMP_COMMANDS = {
   },
   cueTimecode: (tcString) => {
     const bcd = timecodeToBcd(tcString);
-    return `24310004${bcd}`;
+    return `2431${bcd}`;
   },
 };
 

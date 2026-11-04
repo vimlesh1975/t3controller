@@ -1,11 +1,34 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Circle, Square, Disc, RefreshCw } from 'lucide-react';
 
 const DEFAULT_HOST = process.env.NEXT_PUBLIC_T3_HOST || '192.168.145.20';
 const DEFAULT_PORT = parseInt(process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
 const INTERVAL_STORAGE_KEY = 't3_interval_seconds';
+const PREFIX_STORAGE_KEY = 't3_clip_prefixes';
+
+function parseTcToFrames(tc, fps = 29.97) {
+  if (!tc || typeof tc !== 'string') return 0;
+  const parts = tc.replace(/;/g, ':').split(':').map((p) => parseInt(p, 10) || 0);
+  if (parts.length < 4) return 0;
+  const [hh, mm, ss, ff] = parts;
+  const roundedFps = Math.round(fps) || 30;
+  return (hh * 3600 + mm * 60 + ss) * roundedFps + ff;
+}
+
+function formatFramesToTc(totalFrames, fps = 29.97) {
+  const roundedFps = Math.round(fps) || 30;
+  const frames = Math.max(0, Math.floor(totalFrames));
+  const ff = frames % roundedFps;
+  const totalSeconds = Math.floor(frames / roundedFps);
+  const ss = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const mm = totalMinutes % 60;
+  const hh = Math.floor(totalMinutes / 60) % 24;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
+}
 
 export default function CompactTripleChannelRecordPage() {
   const [deckState, setDeckState] = useState(null);
@@ -14,6 +37,11 @@ export default function CompactTripleChannelRecordPage() {
     Vtr1: '10',
     Vtr2: '10',
     Vtr3: '10',
+  });
+  const [clipPrefixes, setClipPrefixes] = useState({
+    Vtr1: '',
+    Vtr2: '',
+    Vtr3: '',
   });
   const [playerClipNames, setPlayerClipNames] = useState({
     Vtr1: '',
@@ -27,8 +55,12 @@ export default function CompactTripleChannelRecordPage() {
   });
   const [clipSearch, setClipSearch] = useState('');
   const [dragOverChannel, setDragOverChannel] = useState(null);
+  const [selectedPlayerChannel, setSelectedPlayerChannel] = useState('Vtr3');
+  const [scrubbingFrames, setScrubbingFrames] = useState({});
+  const lastScrubSentRef = useRef({});
+  const wasPlayingBeforeScrubRef = useRef({});
 
-  // Restore saved interval recording durations from localStorage on mount
+  // Restore saved interval recording durations and clip prefixes from localStorage on mount
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(INTERVAL_STORAGE_KEY);
@@ -39,6 +71,17 @@ export default function CompactTripleChannelRecordPage() {
             Vtr1: parsed.Vtr1 ? String(parsed.Vtr1) : prev.Vtr1,
             Vtr2: parsed.Vtr2 ? String(parsed.Vtr2) : prev.Vtr2,
             Vtr3: parsed.Vtr3 ? String(parsed.Vtr3) : prev.Vtr3,
+          }));
+        }
+      }
+      const rawPrefixes = window.localStorage.getItem(PREFIX_STORAGE_KEY);
+      if (rawPrefixes) {
+        const parsedPrefixes = JSON.parse(rawPrefixes);
+        if (parsedPrefixes && typeof parsedPrefixes === 'object') {
+          setClipPrefixes((prev) => ({
+            Vtr1: typeof parsedPrefixes.Vtr1 === 'string' ? parsedPrefixes.Vtr1 : prev.Vtr1,
+            Vtr2: typeof parsedPrefixes.Vtr2 === 'string' ? parsedPrefixes.Vtr2 : prev.Vtr2,
+            Vtr3: typeof parsedPrefixes.Vtr3 === 'string' ? parsedPrefixes.Vtr3 : prev.Vtr3,
           }));
         }
       }
@@ -64,6 +107,16 @@ export default function CompactTripleChannelRecordPage() {
           };
           setIntervalSeconds(fromServer);
           window.localStorage.setItem(INTERVAL_STORAGE_KEY, JSON.stringify(fromServer));
+        }
+        const hasLocalPrefixes = Boolean(window.localStorage.getItem(PREFIX_STORAGE_KEY));
+        if (!hasLocalPrefixes) {
+          const prefixesFromServer = {
+            Vtr1: String(data.channels.Vtr1?.clipPrefix || ''),
+            Vtr2: String(data.channels.Vtr2?.clipPrefix || ''),
+            Vtr3: String(data.channels.Vtr3?.clipPrefix || ''),
+          };
+          setClipPrefixes(prefixesFromServer);
+          window.localStorage.setItem(PREFIX_STORAGE_KEY, JSON.stringify(prefixesFromServer));
         }
       } catch (err) {}
     };
@@ -221,13 +274,17 @@ export default function CompactTripleChannelRecordPage() {
   }, [playerClipNames, sendCommand]);
 
   const loadClipToPlayer = useCallback((clip, targetChannel) => {
-    const fallbackPlayer = ['Vtr1', 'Vtr2', 'Vtr3'].find(
+    const activePlayerIds = ['Vtr1', 'Vtr2', 'Vtr3'].filter(
       (id) => deckState?.channels?.[id]?.type === 'PLAY'
-    ) || 'Vtr3';
-    const chId = targetChannel || fallbackPlayer;
+    );
+    const defaultPlayer = activePlayerIds.includes(selectedPlayerChannel)
+      ? selectedPlayerChannel
+      : activePlayerIds[0] || 'Vtr3';
+    const chId = targetChannel || defaultPlayer;
+    setSelectedPlayerChannel(chId);
     setPlayerClipNames((prev) => ({ ...prev, [chId]: clip.name }));
     sendCommand('load_clip', chId, { clipName: clip.name });
-  }, [deckState, sendCommand]);
+  }, [deckState, selectedPlayerChannel, sendCommand]);
 
   const syncClipList = useCallback(() => {
     sendCommand('sync_clips', 'Vtr1');
@@ -321,8 +378,14 @@ export default function CompactTripleChannelRecordPage() {
     { id: 'Vtr2', ch: ch2 },
     { id: 'Vtr3', ch: ch3 },
   ];
+  const playerChannels = allChannels.filter(({ ch }) => ch.type === 'PLAY');
+  const activeTargetPlayerId = playerChannels.some(({ id }) => id === selectedPlayerChannel)
+    ? selectedPlayerChannel
+    : playerChannels[0]?.id || 'Vtr3';
+  const activeTargetPlayerCode =
+    playerChannels.find(({ id }) => id === activeTargetPlayerId)?.ch?.shortCode || 'P1';
   const recorderCodes = allChannels.filter(({ ch }) => ch.type !== 'PLAY').map(({ ch }) => ch.shortCode || 'R');
-  const playerCodes = allChannels.filter(({ ch }) => ch.type === 'PLAY').map(({ ch }) => ch.shortCode || 'P');
+  const playerCodes = playerChannels.map(({ ch }) => ch.shortCode || 'P');
   const allCodes = allChannels.map(({ ch }) => ch.shortCode || ch.id);
 
   const host = deckState?.host || DEFAULT_HOST;
@@ -523,6 +586,88 @@ export default function CompactTripleChannelRecordPage() {
       </div>
 
       {isRecorder && <>
+      {/* Working Folder / Bin Selector (Recorders only) */}
+      <label
+        htmlFor={`${chId.toLowerCase()}-working-folder`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '10px',
+          marginTop: '4px',
+          color: '#cbd5e1',
+          fontSize: '12px',
+          fontWeight: 700,
+        }}
+      >
+        <span>T3 Folder / Bin</span>
+        <select
+          id={`${chId.toLowerCase()}-working-folder`}
+          value={ch.workingFolder || 'Default'}
+          onChange={(event) => {
+            const folder = event.target.value;
+            sendCommand('set_working_folder', chId, { folder });
+          }}
+          style={{
+            maxWidth: '155px',
+            padding: '5px 8px',
+            border: '1px solid rgba(255, 255, 255, 0.18)',
+            borderRadius: '6px',
+            background: '#04060a',
+            color: '#f8fafc',
+            fontSize: '12px',
+          }}
+        >
+          {(deckState?.folders?.length ? deckState.folders : ['Default']).map((folder) => (
+            <option key={folder} value={folder}>
+              {folder}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label
+        htmlFor={`${chId.toLowerCase()}-clip-prefix`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '10px',
+          color: '#cbd5e1',
+          fontSize: '12px',
+          fontWeight: 700,
+        }}
+      >
+        <span>Clip name prefix</span>
+        <input
+          id={`${chId.toLowerCase()}-clip-prefix`}
+          type="text"
+          maxLength={48}
+          placeholder="Auto (Clip-...)"
+          value={clipPrefixes[chId] || ''}
+          onChange={(event) => {
+            const value = event.target.value.replace(/[^A-Za-z0-9_-]/g, '');
+            setClipPrefixes((previous) => {
+              const next = { ...previous, [chId]: value };
+              try {
+                window.localStorage.setItem(PREFIX_STORAGE_KEY, JSON.stringify(next));
+              } catch (err) {}
+              return next;
+            });
+            sendCommand('set_clip_prefix', chId, { clipPrefix: value });
+          }}
+          style={{
+            width: '130px',
+            padding: '5px 8px',
+            border: '1px solid rgba(255, 255, 255, 0.18)',
+            borderRadius: '6px',
+            background: '#04060a',
+            color: '#f8fafc',
+            fontSize: '12px',
+          }}
+        />
+      </label>
+
       <label
         htmlFor={`${chId.toLowerCase()}-interval-seconds`}
         style={{
@@ -607,7 +752,25 @@ export default function CompactTripleChannelRecordPage() {
       </button>
       </>}
 
-      {!isRecorder && (
+      {!isRecorder && (() => {
+        const fps = ch.fps || 29.97;
+        const inFrames = parseTcToFrames(ch.inPoint || '00:00:00:00', fps);
+        const durFrames = ch.activeClip?.durationFrames
+          || parseTcToFrames(ch.activeClip?.duration, fps)
+          || Math.max(0, parseTcToFrames(ch.outPoint, fps) - inFrames);
+        const maxFrames = Math.max(inFrames + (durFrames || 900), ch.currentFrames || 0, inFrames + 1);
+        const liveFrames = Math.min(maxFrames, Math.max(inFrames, ch.currentFrames ?? parseTcToFrames(ch.timecode, fps)));
+        const activeFrames = scrubbingFrames[chId] !== undefined && scrubbingFrames[chId] !== null
+          ? scrubbingFrames[chId]
+          : liveFrames;
+        const progressPct = maxFrames > inFrames
+          ? Math.min(100, Math.max(0, ((activeFrames - inFrames) / (maxFrames - inFrames)) * 100))
+          : 0;
+        const totalTcDisplay = durFrames > 0
+          ? formatFramesToTc(inFrames + durFrames, fps)
+          : (ch.outPoint && ch.outPoint !== '00:00:00:00' ? ch.outPoint : '--:--:--:--');
+
+        return (
         <section
           aria-label="Player media and transport controls"
           style={{
@@ -618,6 +781,96 @@ export default function CompactTripleChannelRecordPage() {
             borderTop: '1px solid rgba(255, 255, 255, 0.08)',
           }}
         >
+          {/* Player Seek Bar / Timeline Scrubber */}
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '4px',
+              padding: '6px 8px',
+              borderRadius: '6px',
+              background: '#04060a',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '10px', fontFamily: 'monospace', color: '#94a3b8' }}>
+              <span title="Clip Start / In Timecode">IN {ch.inPoint || '00:00:00:00'}</span>
+              <span style={{ color: scrubbingFrames[chId] != null ? '#fbbf24' : '#4ade80', fontWeight: 700 }}>
+                {scrubbingFrames[chId] != null ? `SEEK → ${formatFramesToTc(activeFrames, fps)}` : `${Math.round(progressPct)}%`}
+              </span>
+              <span title="Clip End / Duration Timecode">END {totalTcDisplay}</span>
+            </div>
+            <input
+              type="range"
+              aria-label={`${shortCode} timeline seek bar`}
+              min={inFrames}
+              max={maxFrames}
+              step={1}
+              value={activeFrames}
+              disabled={!ch.activeClip?.name}
+              onMouseDown={() => {
+                wasPlayingBeforeScrubRef.current[chId] = isActive;
+              }}
+              onTouchStart={() => {
+                wasPlayingBeforeScrubRef.current[chId] = isActive;
+              }}
+              onChange={(event) => {
+                if (wasPlayingBeforeScrubRef.current[chId] === undefined) {
+                  wasPlayingBeforeScrubRef.current[chId] = isActive;
+                }
+                const nextFrame = Number(event.target.value);
+                setScrubbingFrames((prev) => ({ ...prev, [chId]: nextFrame }));
+                const targetTc = formatFramesToTc(nextFrame, fps);
+                setPlayerCueTimecodes((prev) => ({ ...prev, [chId]: targetTc }));
+                if (lastScrubSentRef.current[chId]) {
+                  clearTimeout(lastScrubSentRef.current[chId]);
+                }
+                lastScrubSentRef.current[chId] = setTimeout(() => {
+                  sendCommand('cue_timecode', chId, { timecode: targetTc, scrubbing: true });
+                }, 180);
+              }}
+              onMouseUp={(event) => {
+                if (lastScrubSentRef.current[chId]) {
+                  clearTimeout(lastScrubSentRef.current[chId]);
+                  delete lastScrubSentRef.current[chId];
+                }
+                const finalFrame = Number(event.currentTarget.value);
+                const targetTc = formatFramesToTc(finalFrame, fps);
+                const resumePlay = Boolean(wasPlayingBeforeScrubRef.current[chId]);
+                delete wasPlayingBeforeScrubRef.current[chId];
+                sendCommand('cue_timecode', chId, { timecode: targetTc, scrubbing: false, resumePlay });
+                setTimeout(() => {
+                  setScrubbingFrames((prev) => ({ ...prev, [chId]: null }));
+                }, 600);
+              }}
+              onTouchEnd={(event) => {
+                if (lastScrubSentRef.current[chId]) {
+                  clearTimeout(lastScrubSentRef.current[chId]);
+                  delete lastScrubSentRef.current[chId];
+                }
+                const finalFrame = Number(event.currentTarget.value);
+                const targetTc = formatFramesToTc(finalFrame, fps);
+                const resumePlay = Boolean(wasPlayingBeforeScrubRef.current[chId]);
+                delete wasPlayingBeforeScrubRef.current[chId];
+                sendCommand('cue_timecode', chId, { timecode: targetTc, scrubbing: false, resumePlay });
+                setTimeout(() => {
+                  setScrubbingFrames((prev) => ({ ...prev, [chId]: null }));
+                }, 600);
+              }}
+              style={{
+                width: '100%',
+                height: '6px',
+                borderRadius: '999px',
+                appearance: 'none',
+                WebkitAppearance: 'none',
+                background: `linear-gradient(90deg, #22c55e ${progressPct}%, #1e293b ${progressPct}%)`,
+                cursor: ch.activeClip?.name ? 'pointer' : 'not-allowed',
+                accentColor: '#22c55e',
+                outline: 'none',
+              }}
+            />
+          </div>
+
           <div style={{ fontSize: '11px', color: '#94a3b8' }}>
             {isDragOver ? `Drop to load on ${shortCode}` : 'Loaded media:'}{' '}
             <strong style={{ color: ch.activeClip?.name ? '#e2e8f0' : '#fbbf24' }}>
@@ -721,26 +974,30 @@ export default function CompactTripleChannelRecordPage() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
             {[
-              { label: '−1 FRAME', action: 'jog', params: { frames: -1 } },
-              { label: '−2×', action: 'shuttle', params: { rate: -2 } },
-              { label: 'LOOP', action: 'set_loop', params: { enabled: !ch.loop }, active: Boolean(ch.loop) },
-              { label: '+2×', action: 'shuttle', params: { rate: 2 } },
-              { label: '+1 FRAME', action: 'jog', params: { frames: 1 } },
+              { id: 'jog-rev', label: '−1 FRAME', action: 'jog', params: { frames: -1 } },
+              { id: 'shuttle-rev', label: '−2×', action: 'shuttle', params: { rate: -2 } },
+              { id: 'loop', label: ch.loop ? '● LOOP' : 'LOOP', action: 'set_loop', params: { enabled: !ch.loop }, active: Boolean(ch.loop) },
+              { id: 'shuttle-fwd', label: '+2×', action: 'shuttle', params: { rate: 2 } },
+              { id: 'jog-fwd', label: '+1 FRAME', action: 'jog', params: { frames: 1 } },
             ].map((control) => (
               <button
-                key={control.label}
+                key={control.id}
                 type="button"
                 onClick={() => sendCommand(control.action, chId, control.params)}
                 aria-pressed={control.action === 'set_loop' ? Boolean(ch.loop) : undefined}
                 style={{
-                  border: `1px solid ${control.active ? '#22c55e' : 'rgba(255, 255, 255, 0.14)'}`,
+                  border: `1.5px solid ${control.active ? '#22c55e' : 'rgba(255, 255, 255, 0.14)'}`,
                   borderRadius: '6px',
                   padding: '8px 4px',
-                  background: control.active ? '#14532d' : '#111827',
-                  color: '#e2e8f0',
+                  background: control.active
+                    ? 'linear-gradient(180deg, #16a34a 0%, #15803d 100%)'
+                    : '#111827',
+                  color: control.active ? '#ffffff' : '#e2e8f0',
+                  boxShadow: control.active ? '0 0 12px rgba(34, 197, 94, 0.65), inset 0 1px 2px rgba(255, 255, 255, 0.35)' : 'none',
                   fontSize: '10px',
-                  fontWeight: 700,
+                  fontWeight: 800,
                   cursor: 'pointer',
+                  transition: 'all 0.15s ease',
                 }}
               >
                 {control.label}
@@ -748,7 +1005,8 @@ export default function CompactTripleChannelRecordPage() {
             ))}
           </div>
         </section>
-      )}
+        );
+      })()}
     </div>
   );
   };
@@ -793,20 +1051,44 @@ export default function CompactTripleChannelRecordPage() {
           <div style={{
             display: 'flex',
             alignItems: 'center',
-            gap: '6px',
-            color: isConnected ? '#4ade80' : '#f87171',
+            gap: '10px',
             fontFamily: 'monospace',
             fontWeight: 700,
             fontSize: '11px',
           }}>
+            {deckState?.systemName && (
+              <span style={{ color: '#94a3b8' }} title="T3 System Hostname">
+                {deckState.systemName}
+              </span>
+            )}
+            {deckState?.remainingRecordTime && (
+              <span
+                style={{
+                  color: '#38bdf8',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  background: 'rgba(56, 189, 248, 0.12)',
+                }}
+                title="Remaining recording time on T3 storage"
+              >
+                FREE {deckState.remainingRecordTime}
+              </span>
+            )}
             <span style={{
-              width: '7px',
-              height: '7px',
-              borderRadius: '50%',
-              backgroundColor: isConnected ? '#22c55e' : '#ef4444',
-              boxShadow: `0 0 6px ${isConnected ? '#22c55e' : '#ef4444'}`,
-            }} />
-            <span>{host}:{port}</span>
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              color: isConnected ? '#4ade80' : '#f87171',
+            }}>
+              <span style={{
+                width: '7px',
+                height: '7px',
+                borderRadius: '50%',
+                backgroundColor: isConnected ? '#22c55e' : '#ef4444',
+                boxShadow: `0 0 6px ${isConnected ? '#22c55e' : '#ef4444'}`,
+              }} />
+              <span>{host}:{port}</span>
+            </span>
           </div>
         </div>
 
@@ -934,16 +1216,98 @@ export default function CompactTripleChannelRecordPage() {
             borderRadius: '10px',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
             <div>
               <div style={{ fontSize: '13px', fontWeight: 800, color: '#f8fafc' }}>CLIP LIST</div>
               <div style={{ marginTop: '3px', fontSize: '10px', color: '#94a3b8' }}>
-                {deckState?.clipListSource === 'simulator'
-                  ? 'Drag a clip onto the P1 deck to load it.'
-                  : 'T3 clip IDs seen on connected decks · drag a clip onto P1 to load it.'}
+                Drag a clip onto a player deck, click a player button, or double-click to load onto <strong>{activeTargetPlayerCode}</strong>.
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+              <label
+                htmlFor="clip-list-working-folder"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '4px 8px',
+                  borderRadius: '6px',
+                  background: '#04060a',
+                  border: '1px solid rgba(255, 255, 255, 0.16)',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  color: '#cbd5e1',
+                }}
+              >
+                <span>T3 Folder:</span>
+                <select
+                  id="clip-list-working-folder"
+                  value={deckState?.clipListFolder || playerChannels[0]?.ch?.workingFolder || 'Default'}
+                  onChange={(event) => {
+                    const folder = event.target.value;
+                    sendCommand('set_working_folder', activeTargetPlayerId, { folder, scope: 'clip_list' });
+                  }}
+                  style={{
+                    padding: '2px 4px',
+                    border: 'none',
+                    borderRadius: '4px',
+                    background: '#04060a',
+                    color: '#f8fafc',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  {(deckState?.folders?.length ? deckState.folders : ['Default']).map((folder) => (
+                    <option key={folder} value={folder}>
+                      {folder}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {playerChannels.length > 1 && (
+                <div
+                  role="group"
+                  aria-label="Double-click target player"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '3px 6px',
+                    borderRadius: '6px',
+                    background: '#04060a',
+                    border: '1px solid rgba(255, 255, 255, 0.14)',
+                    fontSize: '10px',
+                    color: '#94a3b8',
+                  }}
+                >
+                  <span>Dbl-click →</span>
+                  {playerChannels.map(({ id, ch }) => {
+                    const code = ch.shortCode || id;
+                    const selected = id === activeTargetPlayerId;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setSelectedPlayerChannel(id)}
+                        style={{
+                          padding: '3px 7px',
+                          borderRadius: '4px',
+                          border: `1px solid ${selected ? '#22c55e' : 'rgba(255, 255, 255, 0.14)'}`,
+                          background: selected ? '#14532d' : '#111827',
+                          color: '#fff',
+                          fontSize: '10px',
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {code}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               <input
                 type="search"
                 aria-label="Search clip list"
@@ -1000,41 +1364,70 @@ export default function CompactTripleChannelRecordPage() {
           <div style={{ display: 'grid', gap: '5px', maxHeight: '240px', overflowY: 'auto' }}>
             {(deckState?.clips || [])
               .filter((clip) => clip.name?.toLowerCase().includes(clipSearch.trim().toLowerCase()))
-              .map((clip, index) => (
-                <button
+              .map((clip, index) => {
+                const loadedOnPlayers = playerChannels.filter(({ ch }) => ch.activeClip?.name === clip.name);
+                const isLoadedOnAnyPlayer = loadedOnPlayers.length > 0;
+                return (
+                <div
                   key={clip.id || clip.name}
                   id={`clip-list-item-${index + 1}`}
-                  type="button"
                   draggable
                   onDragStart={(event) => {
                     event.dataTransfer.setData('text/plain', clip.name);
                     event.dataTransfer.effectAllowed = 'copy';
                   }}
                   onDragEnd={() => setDragOverChannel(null)}
-                  onClick={() => loadClipToPlayer(clip)}
-                  title={`Drag to P1 or click to load ${clip.name}`}
+                  onDoubleClick={() => loadClipToPlayer(clip, activeTargetPlayerId)}
+                  title={`Drag to a player deck or double-click to load ${clip.name} onto ${activeTargetPlayerCode}`}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     gap: '12px',
-                    padding: '8px 10px',
-                    border: `1px solid ${ch3.activeClip?.name === clip.name ? 'rgba(34, 197, 94, 0.55)' : 'rgba(255, 255, 255, 0.07)'}`,
+                    padding: '7px 10px',
+                    border: `1px solid ${isLoadedOnAnyPlayer ? 'rgba(34, 197, 94, 0.55)' : 'rgba(255, 255, 255, 0.07)'}`,
                     borderRadius: '6px',
-                    background: ch3.activeClip?.name === clip.name ? 'rgba(20, 83, 45, 0.3)' : '#090c13',
+                    background: isLoadedOnAnyPlayer ? 'rgba(20, 83, 45, 0.3)' : '#090c13',
                     color: '#e2e8f0',
                     textAlign: 'left',
                     cursor: 'grab',
+                    userSelect: 'none',
                   }}
                 >
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '12px', fontWeight: 700 }}>
                     {clip.name}
                   </span>
-                  <span style={{ flexShrink: 0, color: '#94a3b8', fontSize: '10px' }}>
-                    {clip.duration || 'Duration unknown'} · LOAD
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                    {playerChannels.map(({ id, ch }) => {
+                      const code = ch.shortCode || id;
+                      const isLoadedHere = ch.activeClip?.name === clip.name;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            loadClipToPlayer(clip, id);
+                          }}
+                          style={{
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            border: `1px solid ${isLoadedHere ? '#22c55e' : 'rgba(255, 255, 255, 0.16)'}`,
+                            background: isLoadedHere ? '#14532d' : '#1e293b',
+                            color: '#f8fafc',
+                            fontSize: '10px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {isLoadedHere ? `ON ${code}` : `LOAD ${code}`}
+                        </button>
+                      );
+                    })}
                   </span>
-                </button>
-              ))}
+                </div>
+                );
+              })}
             {!(deckState?.clips || []).some((clip) => clip.name?.toLowerCase().includes(clipSearch.trim().toLowerCase())) && (
               <div style={{ padding: '14px 8px', color: '#94a3b8', fontSize: '11px', textAlign: 'center' }}>
                 {deckState?.clipListLoading
